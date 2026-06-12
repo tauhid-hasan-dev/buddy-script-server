@@ -284,9 +284,10 @@
                   "  pm.expect(users.length).to.be.at.most(10);",
                   "  pm.expect(meta).to.include.keys(['page', 'limit', 'total', 'totalPages']);",
                   "});",
-                  "pm.test('profiles do not expose emails', () => {",
+                  "pm.test('profiles include email but never the password hash', () => {",
                   "  const { users } = pm.response.json();",
-                  "  users.forEach(u => pm.expect(u).to.not.have.property('email'));",
+                  "  users.forEach(u => pm.expect(u).to.have.property('email'));",
+                  "  pm.expect(pm.response.text()).to.not.include('Hash');",
                   "});"
                 ],
                 "type": "text/javascript"
@@ -341,11 +342,11 @@
               "script": {
                 "exec": [
                   "pm.test('status is 200', () => pm.response.to.have.status(200));",
-                  "pm.test('returns the public profile without email', () => {",
+                  "pm.test('returns the profile with email', () => {",
                   "  const { user } = pm.response.json();",
                   "  pm.expect(user.id).to.eql(pm.collectionVariables.get('userId'));",
-                  "  pm.expect(user).to.have.keys(['id', 'firstName', 'lastName', 'createdAt']);",
-                  "  pm.expect(user).to.not.have.property('email');",
+                  "  pm.expect(user).to.have.keys(['id', 'firstName', 'lastName', 'email', 'createdAt']);",
+                  "  pm.expect(user.email).to.eql(pm.collectionVariables.get('email'));",
                   "});"
                 ],
                 "type": "text/javascript"

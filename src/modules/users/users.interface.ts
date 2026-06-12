@@ -1,8 +1,10 @@
-// Profile of another user — excludes email (PII stays private to its owner).
+// Profile visible to other authenticated users. Includes email by product
+// decision; passwordHash never leaves the service layer.
 export interface IPublicProfile {
   id: string;
   firstName: string;
   lastName: string;
+  email: string;
   createdAt: Date;
 }
 

@@ -55,14 +55,13 @@ describe('GET /api/users', () => {
     expect(res.body.meta.totalPages).toBeGreaterThan(0);
   });
 
-  it('never exposes emails or password hashes in the list', async () => {
-    const { cookie } = await registerUser();
+  it('includes emails but never password hashes in the list', async () => {
+    const { cookie, body } = await registerUser();
     const res = await request(app).get('/api/users').set('Cookie', cookie);
 
     expect(res.status).toBe(200);
-    for (const user of res.body.users) {
-      expect(user).not.toHaveProperty('email');
-    }
+    const emails = res.body.users.map((u: { email: string }) => u.email);
+    expect(emails).toContain(body.email);
     expect(JSON.stringify(res.body)).not.toContain('Hash');
   });
 
@@ -122,10 +121,11 @@ describe('GET /api/users/:id', () => {
       id: target.id,
       firstName: target.body.firstName,
       lastName: target.body.lastName,
+      email: target.body.email,
     });
   });
 
-  it('does not expose the email or password hash', async () => {
+  it('never exposes the password hash', async () => {
     const target = await registerUser();
     const viewer = await registerUser();
 
@@ -133,7 +133,6 @@ describe('GET /api/users/:id', () => {
       .get(`/api/users/${target.id}`)
       .set('Cookie', viewer.cookie);
 
-    expect(res.body.user).not.toHaveProperty('email');
     expect(JSON.stringify(res.body)).not.toContain('Hash');
   });
 

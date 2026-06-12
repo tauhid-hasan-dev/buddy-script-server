@@ -38,7 +38,7 @@ removed after the run. The auth rate limiter is skipped when
 | GET    | `/api/auth/me`       | ✓    | Current user                                 |
 | GET    | `/api/feed`          | ✓    | Paginated feed: `?cursor=<postId>&limit=20`  |
 | GET    | `/api/users`         | ✓    | Paginated profiles: `?page=1&limit=20`       |
-| GET    | `/api/users/:id`     | ✓    | Public profile (no email)                    |
+| GET    | `/api/users/:id`     | ✓    | User profile (includes email)                |
 | PATCH  | `/api/users/me`      | ✓    | Update own `firstName` / `lastName`          |
 | GET    | `/health`            | —    | Liveness check                               |
 

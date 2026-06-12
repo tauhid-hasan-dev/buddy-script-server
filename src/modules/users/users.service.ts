@@ -20,7 +20,13 @@ async function list(query: IListUsersQuery): Promise<IUsersPage> {
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       skip: (page - 1) * limit,
       take: limit,
-      select: { id: true, firstName: true, lastName: true, createdAt: true },
+      select: {
+        id: true,
+        firstName: true,
+        lastName: true,
+        email: true,
+        createdAt: true,
+      },
     }),
     prisma.user.count(),
   ]);
@@ -34,7 +40,13 @@ async function list(query: IListUsersQuery): Promise<IUsersPage> {
 async function getById(id: string): Promise<IPublicProfile> {
   const user = await prisma.user.findUnique({
     where: { id },
-    select: { id: true, firstName: true, lastName: true, createdAt: true },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+      createdAt: true,
+    },
   });
 
   if (!user) {
