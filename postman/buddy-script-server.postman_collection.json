@@ -8,7 +8,11 @@
     { "key": "baseUrl", "value": "http://localhost:5000" },
     { "key": "email", "value": "" },
     { "key": "password", "value": "TestPassword123" },
-    { "key": "userId", "value": "" }
+    { "key": "userId", "value": "" },
+    { "key": "postId", "value": "" },
+    { "key": "privatePostId", "value": "" },
+    { "key": "commentId", "value": "" },
+    { "key": "replyId", "value": "" }
   ],
   "item": [
     {
@@ -466,6 +470,430 @@
               "raw": "{\n  \"firstName\": \"Sneaky\",\n  \"email\": \"hijacked@example.com\"\n}"
             },
             "url": "{{baseUrl}}/api/users/me"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Posts",
+      "item": [
+        {
+          "name": "Create Post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('returns the post with feed-ready fields', () => {",
+                  "  const { post } = pm.response.json();",
+                  "  pm.expect(post.content).to.eql('Hello from Postman');",
+                  "  pm.expect(post.visibility).to.eql('PUBLIC');",
+                  "  pm.expect(post.likeCount).to.eql(0);",
+                  "  pm.expect(post.commentCount).to.eql(0);",
+                  "  pm.expect(post.likedByMe).to.eql(false);",
+                  "  pm.expect(post.author.id).to.eql(pm.collectionVariables.get('userId'));",
+                  "  pm.collectionVariables.set('postId', post.id);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Hello from Postman\"\n}"
+            },
+            "url": "{{baseUrl}}/api/posts"
+          }
+        },
+        {
+          "name": "Create Private Post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('visibility is PRIVATE', () => {",
+                  "  const { post } = pm.response.json();",
+                  "  pm.expect(post.visibility).to.eql('PRIVATE');",
+                  "  pm.collectionVariables.set('privatePostId', post.id);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Only I can see this\",\n  \"visibility\": \"PRIVATE\"\n}"
+            },
+            "url": "{{baseUrl}}/api/posts"
+          }
+        },
+        {
+          "name": "Create Post — Empty Content",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"content\": \"   \"\n}" },
+            "url": "{{baseUrl}}/api/posts"
+          }
+        },
+        {
+          "name": "Get Post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('returns the post', () => pm.expect(pm.response.json().post.id).to.eql(pm.collectionVariables.get('postId')));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/posts/{{postId}}"
+          }
+        },
+        {
+          "name": "Like Post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('liked with count 1', () => pm.expect(pm.response.json()).to.eql({ liked: true, likeCount: 1 }));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/posts/{{postId}}/like"
+          }
+        },
+        {
+          "name": "Like Post Again (Idempotent)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('still liked, count still 1', () => pm.expect(pm.response.json()).to.eql({ liked: true, likeCount: 1 }));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/posts/{{postId}}/like"
+          }
+        },
+        {
+          "name": "Post Likers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('shows who liked', () => {",
+                  "  const { likes, meta } = pm.response.json();",
+                  "  pm.expect(meta.total).to.eql(1);",
+                  "  pm.expect(likes[0].user.id).to.eql(pm.collectionVariables.get('userId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/posts/{{postId}}/likes"
+          }
+        },
+        {
+          "name": "Unlike Post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('unliked with count 0', () => pm.expect(pm.response.json()).to.eql({ liked: false, likeCount: 0 }));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/posts/{{postId}}/like"
+          }
+        },
+        {
+          "name": "Feed Shows the Post Enriched",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('feed contains the post with like/comment state', () => {",
+                  "  const { posts } = pm.response.json();",
+                  "  const post = posts.find(p => p.id === pm.collectionVariables.get('postId'));",
+                  "  pm.expect(post, 'created post in feed').to.not.be.undefined;",
+                  "  pm.expect(post).to.include.keys(['author', 'likeCount', 'commentCount', 'likedByMe', 'visibility', 'imageUrl']);",
+                  "});",
+                  "pm.test('own private post is in own feed', () => {",
+                  "  const { posts } = pm.response.json();",
+                  "  const priv = posts.find(p => p.id === pm.collectionVariables.get('privatePostId'));",
+                  "  pm.expect(priv, 'private post in own feed').to.not.be.undefined;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/feed?limit=50",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "feed"],
+              "query": [{ "key": "limit", "value": "50" }]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Comments",
+      "item": [
+        {
+          "name": "Create Comment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('returns the comment', () => {",
+                  "  const { comment } = pm.response.json();",
+                  "  pm.expect(comment.content).to.eql('First comment');",
+                  "  pm.expect(comment.parentId).to.eql(null);",
+                  "  pm.collectionVariables.set('commentId', comment.id);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"content\": \"First comment\"\n}" },
+            "url": "{{baseUrl}}/api/posts/{{postId}}/comments"
+          }
+        },
+        {
+          "name": "Create Reply",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('reply points at its parent', () => {",
+                  "  const { comment } = pm.response.json();",
+                  "  pm.expect(comment.parentId).to.eql(pm.collectionVariables.get('commentId'));",
+                  "  pm.collectionVariables.set('replyId', comment.id);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"A reply\",\n  \"parentId\": \"{{commentId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/posts/{{postId}}/comments"
+          }
+        },
+        {
+          "name": "Reply to Reply — Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('explains nesting limit', () => pm.expect(pm.response.json().error).to.match(/replies to replies/i));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"content\": \"Too deep\",\n  \"parentId\": \"{{replyId}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/posts/{{postId}}/comments"
+          }
+        },
+        {
+          "name": "List Comments",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('top-level comment listed with replyCount', () => {",
+                  "  const { comments } = pm.response.json();",
+                  "  const comment = comments.find(c => c.id === pm.collectionVariables.get('commentId'));",
+                  "  pm.expect(comment, 'comment in list').to.not.be.undefined;",
+                  "  pm.expect(comment.replyCount).to.eql(1);",
+                  "  pm.expect(comments.some(c => c.id === pm.collectionVariables.get('replyId')), 'reply not in top-level list').to.be.false;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/posts/{{postId}}/comments"
+          }
+        },
+        {
+          "name": "List Replies",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('reply listed under its parent', () => {",
+                  "  const { replies } = pm.response.json();",
+                  "  pm.expect(replies.map(r => r.id)).to.include(pm.collectionVariables.get('replyId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/comments/{{commentId}}/replies"
+          }
+        },
+        {
+          "name": "Like Comment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('liked with count 1', () => pm.expect(pm.response.json()).to.eql({ liked: true, likeCount: 1 }));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{baseUrl}}/api/comments/{{commentId}}/like"
+          }
+        },
+        {
+          "name": "Comment Likers",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('shows who liked the comment', () => {",
+                  "  const { likes, meta } = pm.response.json();",
+                  "  pm.expect(meta.total).to.eql(1);",
+                  "  pm.expect(likes[0].user.id).to.eql(pm.collectionVariables.get('userId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/comments/{{commentId}}/likes"
+          }
+        },
+        {
+          "name": "Unlike Comment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('unliked with count 0', () => pm.expect(pm.response.json()).to.eql({ liked: false, likeCount: 0 }));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/comments/{{commentId}}/like"
+          }
+        },
+        {
+          "name": "Delete Post",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 204', () => pm.response.to.have.status(204));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/api/posts/{{postId}}"
           }
         }
       ]

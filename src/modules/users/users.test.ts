@@ -65,21 +65,27 @@ describe('GET /api/users', () => {
     expect(JSON.stringify(res.body)).not.toContain('Hash');
   });
 
-  it('paginates: page 2 returns different users than page 1', async () => {
-    // Ensure at least two rows exist.
+  it('paginates with distinct, correctly-sized pages', async () => {
+    // Ensure at least two rows exist. Comparing page 1 vs page 2 across two
+    // requests is racy (other suites insert users concurrently, shifting the
+    // offset window), so distinctness is asserted within a single response.
     await registerUser();
     const { cookie } = await registerUser();
 
-    const page1 = await request(app)
-      .get('/api/users?page=1&limit=1')
+    const res = await request(app)
+      .get('/api/users?page=1&limit=2')
       .set('Cookie', cookie);
+
+    expect(res.status).toBe(200);
+    expect(res.body.users).toHaveLength(2);
+    expect(res.body.users[0].id).not.toBe(res.body.users[1].id);
+
     const page2 = await request(app)
       .get('/api/users?page=2&limit=1')
       .set('Cookie', cookie);
-
-    expect(page1.status).toBe(200);
     expect(page2.status).toBe(200);
-    expect(page1.body.users[0].id).not.toBe(page2.body.users[0].id);
+    expect(page2.body.meta.page).toBe(2);
+    expect(page2.body.users).toHaveLength(1);
   });
 
   it('rejects a limit above the cap', async () => {
