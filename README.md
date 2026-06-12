@@ -37,6 +37,9 @@ removed after the run. The auth rate limiter is skipped when
 | POST   | `/api/auth/logout`   | —    | Clears the auth cookie                       |
 | GET    | `/api/auth/me`       | ✓    | Current user                                 |
 | GET    | `/api/feed`          | ✓    | Paginated feed: `?cursor=<postId>&limit=20`  |
+| GET    | `/api/users`         | ✓    | Paginated profiles: `?page=1&limit=20`       |
+| GET    | `/api/users/:id`     | ✓    | Public profile (no email)                    |
+| PATCH  | `/api/users/me`      | ✓    | Update own `firstName` / `lastName`          |
 | GET    | `/health`            | —    | Liveness check                               |
 
 Register and login set a `token` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` in
@@ -112,4 +115,10 @@ src/
       feed.route.ts             # protected feed
       feed.service.ts           # cursor-paginated reads
       feed.validation.ts        # query params (limit, cursor)
+    users/
+      users.controller.ts
+      users.interface.ts        # IPublicProfile, IUpdateProfileInput
+      users.route.ts            # GET /:id, PATCH /me (both protected)
+      users.service.ts          # profile reads + self-only updates
+      users.validation.ts       # strict schema — unknown fields rejected
 ```

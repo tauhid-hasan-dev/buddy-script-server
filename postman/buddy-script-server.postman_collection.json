@@ -7,7 +7,8 @@
   "variable": [
     { "key": "baseUrl", "value": "http://localhost:5000" },
     { "key": "email", "value": "" },
-    { "key": "password", "value": "TestPassword123" }
+    { "key": "password", "value": "TestPassword123" },
+    { "key": "userId", "value": "" }
   ],
   "item": [
     {
@@ -54,6 +55,7 @@
                   "  const { user } = pm.response.json();",
                   "  pm.expect(user.email).to.eql(pm.collectionVariables.get('email'));",
                   "  pm.expect(user).to.have.keys(['id', 'firstName', 'lastName', 'email', 'createdAt']);",
+                  "  pm.collectionVariables.set('userId', user.id);",
                   "});",
                   "pm.test('sets httpOnly auth cookie', () => {",
                   "  const setCookie = pm.response.headers.get('Set-Cookie');",
@@ -261,6 +263,208 @@
               "path": ["api", "feed"],
               "query": [{ "key": "cursor", "value": "not-a-number" }]
             }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "List Users",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('returns users with pagination meta', () => {",
+                  "  const { users, meta } = pm.response.json();",
+                  "  pm.expect(users).to.be.an('array').that.is.not.empty;",
+                  "  pm.expect(users.length).to.be.at.most(10);",
+                  "  pm.expect(meta).to.include.keys(['page', 'limit', 'total', 'totalPages']);",
+                  "});",
+                  "pm.test('profiles do not expose emails', () => {",
+                  "  const { users } = pm.response.json();",
+                  "  users.forEach(u => pm.expect(u).to.not.have.property('email'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/users?page=1&limit=10",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "10" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "List Users — Limit Above Cap",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('flags the limit field', () => {",
+                  "  const { details } = pm.response.json();",
+                  "  pm.expect(details.map(d => d.field)).to.include('limit');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/users?limit=999",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "users"],
+              "query": [{ "key": "limit", "value": "999" }]
+            }
+          }
+        },
+        {
+          "name": "Get User Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('returns the public profile without email', () => {",
+                  "  const { user } = pm.response.json();",
+                  "  pm.expect(user.id).to.eql(pm.collectionVariables.get('userId'));",
+                  "  pm.expect(user).to.have.keys(['id', 'firstName', 'lastName', 'createdAt']);",
+                  "  pm.expect(user).to.not.have.property('email');",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/users/{{userId}}"
+          }
+        },
+        {
+          "name": "Get User — Invalid Id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));",
+                  "pm.test('explains the error', () => pm.expect(pm.response.json().error).to.eql('Invalid user id'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/users/not-a-uuid"
+          }
+        },
+        {
+          "name": "Get User — Not Found",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 404', () => pm.response.to.have.status(404));",
+                  "pm.test('explains the error', () => pm.expect(pm.response.json().error).to.eql('User not found'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/api/users/00000000-0000-4000-8000-000000000000"
+          }
+        },
+        {
+          "name": "Update My Profile",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('returns the updated profile', () => {",
+                  "  const { user } = pm.response.json();",
+                  "  pm.expect(user.firstName).to.eql('Updated');",
+                  "  pm.expect(user.lastName).to.eql('Name');",
+                  "  pm.expect(user.id).to.eql(pm.collectionVariables.get('userId'));",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Updated\",\n  \"lastName\": \"Name\"\n}"
+            },
+            "url": "{{baseUrl}}/api/users/me"
+          }
+        },
+        {
+          "name": "Update My Profile — Empty Body",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 400', () => pm.response.to.have.status(400));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{baseUrl}}/api/users/me"
+          }
+        },
+        {
+          "name": "Update My Profile — Unknown Field Rejected",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status is 400 (email cannot be updated here)', () => pm.response.to.have.status(400));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"Sneaky\",\n  \"email\": \"hijacked@example.com\"\n}"
+            },
+            "url": "{{baseUrl}}/api/users/me"
           }
         }
       ]
