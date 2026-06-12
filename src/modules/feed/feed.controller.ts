@@ -8,7 +8,7 @@ async function getFeed(req: Request, res: Response): Promise<void> {
   // validated here rather than via the body-replacing validate middleware.
   // A ZodError thrown here becomes a 400 in the global error handler.
   const query = feedQuerySchema.parse(req.query);
-  const page = await FeedService.getFeed(query);
+  const page = await FeedService.getFeed(req.user!.id, query);
   res.json(page);
 }
 

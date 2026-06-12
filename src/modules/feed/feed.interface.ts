@@ -1,20 +1,11 @@
+import type { IPostDto } from '../posts/posts.interface';
+
 export interface IFeedQuery {
   limit: number;
   cursor?: string;
 }
 
-export interface IFeedPost {
-  id: string; // BigInt serialized as string for JSON safety
-  content: string;
-  createdAt: Date;
-  author: {
-    id: string;
-    firstName: string;
-    lastName: string;
-  };
-}
-
 export interface IFeedPage {
-  posts: IFeedPost[];
+  posts: IPostDto[];
   nextCursor: string | null;
 }
