@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  firstName    String   @map("first_name") @db.VarChar(50)
+  lastName     String   @map("last_name") @db.VarChar(50)
+  email        String   @unique @db.VarChar(255)
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  posts Post[]
+
+  @@map("users")
+}
+
+// Designed for millions of rows: BigInt PK keeps the index compact and
+// insert-ordered; the composite (authorId, id desc) and (id desc) indexes
+// serve cursor-based feed pagination without OFFSET scans.
+model Post {
+  id        BigInt   @id @default(autoincrement())
+  authorId  String   @map("author_id") @db.Uuid
+  content   String   @db.VarChar(5000)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz()
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz()
+
+  author User @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([authorId, id(sort: Desc)])
+  @@map("posts")
+}
