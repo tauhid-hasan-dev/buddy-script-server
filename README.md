@@ -13,6 +13,21 @@ npm run dev            # tsx watch mode → http://localhost:5000
 
 Production: `npm run build` then `npm start` (runs compiled JS from `dist/`).
 
+## Tests
+
+```bash
+npm test          # Vitest + Supertest integration tests (needs the database)
+npm run test:watch
+```
+
+24 integration tests cover registration, login, the `/me` endpoint, logout,
+and authorization on the feed — including security cases: password never
+echoed, bcrypt-hashed at rest, generic 401s (no user enumeration),
+case-insensitive duplicate emails, malformed/deleted-user tokens, and
+httpOnly cookie flags. Test rows use a `test_auth_` email prefix and are
+removed after the run. The auth rate limiter is skipped when
+`NODE_ENV=test`.
+
 ## API
 
 | Method | Path                 | Auth | Description                                  |

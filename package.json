@@ -7,6 +7,8 @@
     "start": "node dist/server.js",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio"
@@ -34,8 +36,11 @@
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^25.9.3",
+    "@types/supertest": "^7.2.0",
     "prisma": "^6.19.3",
+    "supertest": "^7.2.2",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
   }
 }
