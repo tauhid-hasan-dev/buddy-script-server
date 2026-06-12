@@ -1,17 +1,18 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import request from 'supertest';
 import { afterAll, describe, expect, it } from 'vitest';
 import app from '../../app';
+import config from '../../config';
 import prisma from '../../lib/prisma';
-import { UPLOAD_DIR } from '../../middleware/upload';
+import { StorageService } from '../../lib/storage';
 
 const EMAIL_PREFIX = 'test_posts_';
 let emailCounter = 0;
 const uniqueEmail = () => `${EMAIL_PREFIX}${process.pid}_${emailCounter++}@example.com`;
 
 const PASSWORD = 'SuperSecret123';
-const uploadedFiles: string[] = [];
+// Supabase Storage objects created by tests, removed in afterAll.
+const uploadedImageUrls: string[] = [];
+const storageConfigured = config.supabase !== null;
 
 async function registerUser() {
   const res = await request(app).post('/api/auth/register').send({
@@ -42,8 +43,8 @@ afterAll(async () => {
   // Cascades remove this suite's posts, comments, and likes.
   await prisma.user.deleteMany({ where: { email: { startsWith: EMAIL_PREFIX } } });
   await prisma.$disconnect();
-  for (const file of uploadedFiles) {
-    fs.rmSync(file, { force: true });
+  for (const url of uploadedImageUrls) {
+    await StorageService.removeImage(url);
   }
 });
 
@@ -79,25 +80,28 @@ describe('POST /api/posts', () => {
     expect(post.visibility).toBe('PRIVATE');
   });
 
-  it('creates a post with an image via multipart upload', async () => {
-    const { cookie } = await registerUser();
-    const res = await request(app)
-      .post('/api/posts')
-      .set('Cookie', cookie)
-      .field('content', 'with image')
-      .attach('image', Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'photo.png');
+  // Requires real Supabase credentials in .env; skipped until configured.
+  it.skipIf(!storageConfigured)(
+    'creates a post with an image stored in Supabase Storage',
+    async () => {
+      const { cookie } = await registerUser();
+      const res = await request(app)
+        .post('/api/posts')
+        .set('Cookie', cookie)
+        .field('content', 'with image')
+        .attach('image', Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'photo.png');
 
-    expect(res.status).toBe(201);
-    expect(res.body.post.imageUrl).toMatch(/^\/uploads\/[0-9a-f-]+\.png$/);
+      expect(res.status).toBe(201);
+      expect(res.body.post.imageUrl).toMatch(
+        /\/storage\/v1\/object\/public\/.+\.png$/
+      );
+      uploadedImageUrls.push(res.body.post.imageUrl);
 
-    const filePath = path.join(UPLOAD_DIR, path.basename(res.body.post.imageUrl));
-    uploadedFiles.push(filePath);
-    expect(fs.existsSync(filePath)).toBe(true);
-
-    // The image is actually served.
-    const img = await request(app).get(res.body.post.imageUrl);
-    expect(img.status).toBe(200);
-  });
+      // The public URL actually serves the object.
+      const img = await fetch(res.body.post.imageUrl);
+      expect(img.status).toBe(200);
+    }
+  );
 
   it('rejects non-image uploads', async () => {
     const { cookie } = await registerUser();
@@ -111,7 +115,9 @@ describe('POST /api/posts', () => {
     expect(res.body.error).toMatch(/JPEG, PNG, WebP or GIF/);
   });
 
-  it('rejects empty content and cleans up an uploaded file', async () => {
+  it('rejects empty content even when an image is attached', async () => {
+    // Validation runs before the storage upload, so a failed request never
+    // creates an orphan object.
     const { cookie } = await registerUser();
     const res = await request(app)
       .post('/api/posts')
@@ -120,15 +126,6 @@ describe('POST /api/posts', () => {
       .attach('image', Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'orphan.png');
 
     expect(res.status).toBe(400);
-    // No orphan left behind: give the async unlink a moment, then check.
-    await new Promise((r) => setTimeout(r, 100));
-    const orphans = fs
-      .readdirSync(UPLOAD_DIR)
-      .filter((f) => f.endsWith('.png'))
-      .filter((f) => !uploadedFiles.some((u) => u.endsWith(f)));
-    // Can't know the random name, but the dir shouldn't accumulate files from
-    // this failed request beyond ones other tests created and tracked.
-    expect(orphans.length).toBe(0);
   });
 
   it('rejects an invalid visibility value', async () => {

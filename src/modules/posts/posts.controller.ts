@@ -4,8 +4,7 @@ import { PostsService } from './posts.service';
 import { likersQuerySchema } from './posts.validation';
 
 async function create(req: Request, res: Response): Promise<void> {
-  const imageUrl = req.file ? `/uploads/${req.file.filename}` : null;
-  const post = await PostsService.create(req.user!.id, req.body, imageUrl);
+  const post = await PostsService.create(req.user!.id, req.body, req.file);
   res.status(201).json({ post });
 }
 

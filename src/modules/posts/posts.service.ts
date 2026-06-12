@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma';
+import { StorageService } from '../../lib/storage';
 import HttpError from '../../utils/httpError';
 import type {
   ICreatePostInput,
@@ -62,14 +63,22 @@ export async function assertPostVisible(
 async function create(
   authorId: string,
   input: ICreatePostInput,
-  imageUrl: string | null
+  image?: { buffer: Buffer; mimetype: string }
 ): Promise<IPostDto> {
-  const post = await prisma.post.create({
-    data: { authorId, content: input.content, visibility: input.visibility, imageUrl },
-    select: postSelect(authorId),
-  });
+  // Upload happens after validation passed, so the only orphan window is a
+  // failed insert — handled below by removing the just-uploaded object.
+  const imageUrl = image ? await StorageService.uploadImage(image) : null;
 
-  return toPostDto(post);
+  try {
+    const post = await prisma.post.create({
+      data: { authorId, content: input.content, visibility: input.visibility, imageUrl },
+      select: postSelect(authorId),
+    });
+    return toPostDto(post);
+  } catch (err) {
+    if (imageUrl) void StorageService.removeImage(imageUrl);
+    throw err;
+  }
 }
 
 async function getById(postId: bigint, viewerId: string): Promise<IPostDto> {

@@ -6,10 +6,17 @@ Express 5 + TypeScript + PostgreSQL (Prisma) API with JWT authentication deliver
 
 ```bash
 npm install
-cp .env.example .env   # fill in DATABASE_URL and JWT_SECRET
-npm run db:migrate     # creates the database schema
+cp .env.example .env   # fill in the Supabase URLs, keys, and JWT_SECRET
+npm run db:deploy      # applies migrations to Supabase (uses DIRECT_URL)
+npm run storage:setup  # one-time: creates the public post-images bucket
 npm run dev            # tsx watch mode → http://localhost:5000
 ```
+
+Database is Supabase Postgres: the app connects through the transaction-mode
+pooler (`DATABASE_URL`, port 6543, `pgbouncer=true`), while Prisma migrations
+use the session-mode pooler (`DIRECT_URL`, port 5432). Post images live in
+Supabase Storage; the server uses the `service_role` key (server-side only —
+never expose it to a client).
 
 Production: `npm run build` then `npm start` (runs compiled JS from `dist/`).
 
@@ -62,9 +69,11 @@ skipped when `NODE_ENV=test`.
   posts return **404** to other users, not 403, so their existence leaks
   nothing.
 - **Images**: optional `image` file in multipart form-data (JPEG/PNG/WebP/GIF,
-  ≤5MB). Files get random UUID names under `/uploads` (client filenames are
-  never trusted) and are served statically with immutable caching. Failed
-  requests clean up their uploaded file.
+  ≤5MB, validated by MIME type). Files upload to **Supabase Storage** (public
+  `post-images` bucket) under random UUID names — client filenames are never
+  trusted — and `image_url` stores the public CDN URL. Uploads are in-memory
+  buffers (no local disk), so the API stays stateless across replicas; a
+  failed insert removes its just-uploaded object.
 - **Likes are idempotent**: double-tap or retry safely; responses return the
   authoritative `{ liked, likeCount }`. Every post/comment carries
   `likedByMe`, `likeCount`, and counts computed per-viewer.

@@ -3,7 +3,6 @@ import { ZodError } from 'zod';
 import multer from 'multer';
 import config from '../config';
 import HttpError from '../utils/httpError';
-import { removeUploadedFile } from './upload';
 
 export function notFound(_req: Request, res: Response): void {
   res.status(404).json({ error: 'Not Found' });
@@ -15,14 +14,10 @@ export function notFound(_req: Request, res: Response): void {
 // query details) never leak to clients.
 export function errorHandler(
   err: unknown,
-  req: Request,
+  _req: Request,
   res: Response,
   _next: NextFunction
 ): void {
-  // If multer already stored a file and the request still failed
-  // (validation, auth, etc.), don't leave the orphan on disk.
-  removeUploadedFile(req.file?.path);
-
   if (err instanceof multer.MulterError) {
     const message =
       err.code === 'LIMIT_FILE_SIZE'
