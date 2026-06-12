@@ -81,9 +81,10 @@ skipped when `NODE_ENV=test`.
   (`parentId`); replies-to-replies are rejected with 400. Comments paginate
   newest-first by cursor; replies oldest-first (conversation order).
 
-Register and login set a `token` cookie (`HttpOnly`, `SameSite=Lax`, `Secure` in
-production) and return the user. Protected routes also accept
-`Authorization: Bearer <token>` for non-browser clients.
+Register and login set a `token` cookie (`HttpOnly`; `SameSite=Lax` in
+development, `SameSite=None; Secure` in production because the deployed
+frontend and API live on different sites) and return the user. Protected
+routes also accept `Authorization: Bearer <token>` for non-browser clients.
 
 Errors are JSON: `{ "error": "..." }`, with a `details` array of
 `{ field, message }` for validation failures (400). Duplicate email → 409,
@@ -93,7 +94,10 @@ bad credentials / missing auth → 401.
 
 - **JWT in an httpOnly cookie** — stateless (no session store to scale), and
   the cookie is invisible to JavaScript, so an XSS bug can't exfiltrate the
-  token the way it could from localStorage. `SameSite=Lax` mitigates CSRF.
+  token the way it could from localStorage. `SameSite=Lax` mitigates CSRF in
+  development; production uses `SameSite=None; Secure` (required for the
+  cross-site Vercel → Render deployment), with CSRF contained by CORS locked
+  to the single `CLIENT_URL` origin and JSON-only request bodies.
 - **bcrypt, cost 12** — adaptive hashing; passwords capped at 72 bytes
   (bcrypt's input limit) and validated to 8+ characters.
 - **No user enumeration** — login compares against a dummy hash when the

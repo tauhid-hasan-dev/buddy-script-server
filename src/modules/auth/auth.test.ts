@@ -68,9 +68,11 @@ describe('POST /api/auth/register', () => {
     expect(row?.passwordHash).toMatch(/^\$2[aby]\$/); // bcrypt format
   });
 
-  it('sets an httpOnly, SameSite=Lax auth cookie', async () => {
+  it('sets an httpOnly, SameSite=Lax auth cookie (None+Secure in production)', async () => {
     const { cookie } = await registerUser();
     expect(cookie).toContain('HttpOnly');
+    // NODE_ENV=test takes the development branch; production switches to
+    // SameSite=None; Secure for the cross-site frontend → API deployment.
     expect(cookie).toContain('SameSite=Lax');
   });
 
