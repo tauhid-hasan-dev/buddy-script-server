@@ -233,6 +233,10 @@ describe('PATCH /api/posts/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.post.likedByMe).toBe(true);
     expect(res.body.post.likeCount).toBe(1);
+    // The single-statement update projects the reaction breakdown from the
+    // unchanged row — an edit must not drop or alter it.
+    expect(res.body.post.myReaction).toBe('LIKE');
+    expect(res.body.post.reactions).toEqual([{ type: 'LIKE', count: 1 }]);
   });
 
   it('400s an empty body (nothing to update)', async () => {

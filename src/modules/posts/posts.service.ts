@@ -30,34 +30,6 @@ export function postSelect(viewerId: string) {
 
 type PostRow = Prisma.PostGetPayload<{ select: ReturnType<typeof postSelect> }>;
 
-// Per-type reaction tallies for a set of posts, in one indexed GROUP BY query
-// (post_likes_post_id_type_idx) — O(distinct reactions on the page), so the
-// feed stays cheap no matter how many posts exist. Each list is ordered
-// most-popular-first for the stacked-faces summary the client renders.
-export async function reactionBreakdown(
-  postIds: bigint[]
-): Promise<Map<string, IReactionCount[]>> {
-  const map = new Map<string, IReactionCount[]>();
-  if (postIds.length === 0) return map;
-
-  const groups = await prisma.postLike.groupBy({
-    by: ['postId', 'type'],
-    where: { postId: { in: postIds } },
-    _count: { _all: true },
-  });
-
-  for (const group of groups) {
-    const key = group.postId.toString();
-    const list = map.get(key) ?? [];
-    list.push({ type: group.type, count: group._count._all });
-    map.set(key, list);
-  }
-  for (const list of map.values()) {
-    list.sort((a, b) => b.count - a.count);
-  }
-  return map;
-}
-
 export function toPostDto(post: PostRow, reactions: IReactionCount[] = []): IPostDto {
   const mine = post.likes[0];
   return {
@@ -75,19 +47,13 @@ export function toPostDto(post: PostRow, reactions: IReactionCount[] = []): IPos
   };
 }
 
-// Single-post DTO: load the row's reaction breakdown and map it.
-async function dtoForRow(post: PostRow): Promise<IPostDto> {
-  const map = await reactionBreakdown([post.id]);
-  return toPostDto(post, map.get(post.id.toString()) ?? []);
-}
-
 // --- Single-query read projection (feed + single post) ---------------------
-// The Prisma `postSelect` + `reactionBreakdown` pair needs two round-trips: one
-// for the page rows, one for the per-type tally. Against the remote DB that's
-// two × ~700ms. This raw projection folds everything — author, like/comment
-// counts, the viewer's own reaction, and the per-type breakdown as JSON — into
-// ONE statement so reads cost a single trip. Every correlated subquery is
-// indexed (post_likes/comments by post_id), so the page stays O(page size).
+// Fetching the page rows and then a separate per-type tally needs two round-
+// trips; against the remote DB that's two × ~700ms. This raw projection folds
+// everything — author, like/comment counts, the viewer's own reaction, and the
+// per-type breakdown as JSON — into ONE statement so reads cost a single trip.
+// Every correlated subquery is indexed (post_likes/comments by post_id), so the
+// page stays O(page size).
 export interface IPostRawRow {
   id: bigint;
   content: string;
@@ -201,37 +167,64 @@ async function getById(postId: bigint, viewerId: string): Promise<IPostDto> {
   return rawRowToDto(row);
 }
 
-// Edit own post's content and/or visibility. Ownership is checked the same
-// way as delete: 404 when the row doesn't exist, 403 when it isn't yours —
-// editing is an explicit owner action, so a 403 here doesn't leak anything a
-// delete wouldn't. Image edits are out of scope (kept as-is).
+// Edit own post's content and/or visibility, in ONE round-trip. Ownership is
+// checked the same way as delete: 404 when the row doesn't exist, 403 when it
+// isn't yours — editing is an explicit owner action, so a 403 here doesn't leak
+// anything a delete wouldn't. Image edits are out of scope (kept as-is).
+//
+// The CTE runs the guarded UPDATE (WHERE id AND author = viewer) and the outer
+// projection returns the post DTO. Row presence answers existence (no row →
+// 404); the `owned` flag answers ownership (→ 403). An edit only touches
+// content/visibility, so every other projected field (author, counts,
+// reactions) is read from the unchanged row, while content/visibility come from
+// the UPDATE's RETURNING — correct even though the CTE's write isn't visible to
+// the outer SELECT's snapshot. A non-owner's UPDATE matches nothing, so the
+// COALESCE falls back to the existing values (which we discard on the 403).
 async function update(
   postId: bigint,
   userId: string,
   input: IUpdatePostInput
 ): Promise<IPostDto> {
-  const post = await prisma.post.findUnique({
-    where: { id: postId },
-    select: { authorId: true },
-  });
+  const rows = await prisma.$queryRaw<(IPostRawRow & { owned: boolean })[]>(Prisma.sql`
+    WITH upd AS (
+      UPDATE posts SET
+        content = COALESCE(${input.content ?? null}, content),
+        visibility = COALESCE(${input.visibility ?? null}::"Visibility", visibility),
+        updated_at = now()
+      WHERE id = ${postId} AND author_id = ${userId}::uuid
+      RETURNING content, visibility
+    )
+    SELECT
+      (p.author_id = ${userId}::uuid) AS owned,
+      p.id,
+      COALESCE((SELECT content FROM upd), p.content) AS content,
+      p.image_url,
+      COALESCE((SELECT visibility FROM upd), p.visibility) AS visibility,
+      p.created_at,
+      json_build_object('id', u.id, 'firstName', u.first_name, 'lastName', u.last_name) AS author,
+      (SELECT count(*)::int FROM post_likes pl WHERE pl.post_id = p.id) AS like_count,
+      (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id) AS comment_count,
+      (SELECT pl.type FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${userId}::uuid) AS my_reaction,
+      COALESCE((
+        SELECT json_agg(json_build_object('type', t.type, 'count', t.count) ORDER BY t.count DESC, t.type)
+        FROM (
+          SELECT type, count(*)::int AS count
+          FROM post_likes pl WHERE pl.post_id = p.id GROUP BY type
+        ) t
+      ), '[]'::json) AS reactions
+    FROM posts p
+    JOIN users u ON u.id = p.author_id
+    WHERE p.id = ${postId}
+  `);
 
-  if (!post) {
+  const row = rows[0];
+  if (!row) {
     throw new HttpError(404, 'Post not found');
   }
-  if (post.authorId !== userId) {
+  if (!row.owned) {
     throw new HttpError(403, 'You can only edit your own posts');
   }
-
-  const updated = await prisma.post.update({
-    where: { id: postId },
-    data: {
-      ...(input.content !== undefined ? { content: input.content } : {}),
-      ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
-    },
-    select: postSelect(userId),
-  });
-
-  return dtoForRow(updated);
+  return rawRowToDto(row);
 }
 
 async function remove(postId: bigint, userId: string): Promise<void> {

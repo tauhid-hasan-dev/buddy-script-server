@@ -171,6 +171,15 @@ bad credentials / missing auth → 401.
   is added back, which is correct without re-reading the just-written row. The
   visibility 404 rule is preserved inside the statement (an invisible post
   performs no write and the handler rejects before returning anything).
+- **Editing a post is one round-trip too**: the old ownership-check → update →
+  breakdown was three serial trips. A single statement now runs the guarded
+  `UPDATE ... WHERE id AND author_id = viewer` in a CTE and projects the post
+  DTO in the same query. Row presence distinguishes 404 (missing) from the
+  `owned` flag's 403 (not yours) — the one case a folded `WHERE` alone can't
+  tell apart. Since an edit only touches content/visibility, those two fields
+  come from the UPDATE's `RETURNING` while author, counts, and reactions are
+  read from the (otherwise unchanged) row — correct despite the CTE's write
+  being invisible to the outer SELECT's snapshot.
 - **Stateless auth** — any number of horizontal API replicas without shared
   session state. At larger scale, like/comment counts would denormalize onto
   posts and the hot first feed page would cache in Redis; the current shape
