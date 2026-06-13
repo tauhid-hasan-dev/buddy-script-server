@@ -133,9 +133,14 @@ bad credentials / missing auth → 401.
 - **Duplicate emails handled by the DB** — a unique constraint plus catching
   Prisma `P2002`, instead of a racy check-then-insert. Emails are normalized
   to lowercase at validation.
-- **Rate limiting** on register/login (20 req / 15 min / IP), `helmet`
-  security headers, request body size capped at 100 KB, CORS locked to a
-  single configured origin with credentials.
+- **Rate limiting** on register/login (20 req / 15 min / IP) and on content
+  writes (posts/comments/reactions — 60 / min, keyed by JWT user id so users
+  behind a shared NAT aren't throttled as one). Limits are backed by **Redis
+  when `REDIS_URL` is set** so they hold across replicas (the in-memory default
+  would grant each replica the full quota); without it they use the in-memory
+  store. Skipped under `NODE_ENV=test`. Plus `helmet` security headers, request
+  body size capped at 100 KB, and CORS locked to a single configured origin with
+  credentials.
 - **No leaked internals** — central error handler returns generic 500s in
   production; secrets live in `.env` (git-ignored), validated at boot.
 
@@ -164,12 +169,29 @@ bad credentials / missing auth → 401.
   tally as JSON — from a **single** statement (the shared `postProjection` raw
   query). The remote DB makes round-trips the dominant cost (~700ms each), so
   the old two-trip shape (page rows, then a `GROUP BY (post_id, type)` over the
-  page's ids) doubled feed latency; folding the tallies and counts into indexed
-  correlated subqueries keeps the page **O(page size)** with no N+1 while paying
-  one trip instead of two. `getById` likewise collapses its visibility-check →
+  page's ids) doubled feed latency. The per-viewer reaction and the per-type
+  tally are indexed correlated subqueries, while the like/comment **counts are
+  denormalized columns** (next bullet), so the page stays **O(page size)** with
+  no N+1 while paying one trip instead of two. `getById` likewise collapses its visibility-check →
   fetch → breakdown into one query: the `PUBLIC OR own` predicate is the WHERE
   clause, so a private post seen by a stranger returns no row → 404 (a 403 would
   leak existence).
+- **Like/comment counts are denormalized columns maintained by triggers**
+  (`posts.like_count` / `posts.comment_count`). At millions of posts, recounting
+  `post_likes` / `comments` on every feed row is the dominant read cost, so the
+  feed now reads two `O(1)` columns instead of two correlated `count(*)`
+  subqueries per row. The columns are kept exact by `AFTER INSERT OR DELETE`
+  row triggers on `post_likes` and `comments` (migration
+  `add_denormalized_post_counts`): they fire on every reaction/comment add and
+  remove — including FK **cascade deletes** — and a reaction *switch* is an
+  `UPDATE` of `post_likes.type`, which the triggers ignore, so `like_count`
+  stays correct. Triggers (vs. application-layer increments) cannot drift, need
+  no transaction wrapping in the services, and automatically cover any future
+  writer. The trigger functions resolve the `posts` table via `TG_TABLE_SCHEMA`
+  (dynamic SQL), not an unqualified name, so they are correct regardless of the
+  connection's `search_path` under the pgBouncer transaction pooler. A one-time
+  backfill seeded existing rows; a `count(*)` parity check over all posts
+  confirmed zero drift.
 - **React/un-react are one round-trip**: the database is remote, so each query
   pays real network + pooler latency (≈700ms observed in dev). The naive
   visibility-check → upsert → breakdown sequence is three *serial* trips (~2.1s);
@@ -190,10 +212,33 @@ bad credentials / missing auth → 401.
   come from the UPDATE's `RETURNING` while author, counts, and reactions are
   read from the (otherwise unchanged) row — correct despite the CTE's write
   being invisible to the outer SELECT's snapshot.
+- **Hot feed page is cached** (`src/lib/cache.ts`). The default first feed page
+  (no cursor, limit 20 — exactly what the web client loads) is the single
+  hottest read, so it is cached **per viewer** for a short TTL (15s). Per-viewer
+  keying means the viewer-specific fields (`likedByMe` / `myReaction`) can never
+  leak across users; the key is invalidated on that viewer's own writes (create,
+  edit, delete, react) so they never see their own action go missing, while
+  other viewers see new public posts within the TTL — acceptable bounded
+  staleness for a feed, and the web client already prepends new posts
+  optimistically. **Redis is optional config** (`REDIS_URL`): when set the cache
+  is shared across replicas; when unset it falls back to an in-process store, so
+  dev, tests, and single-instance deploys need no extra service (same opt-in
+  shape as Supabase Storage). Deeper pages and non-default limits always hit the
+  DB.
+- **Raw queries are schema-qualified for the transaction pooler.** Supabase's
+  transaction-mode pooler resets session state (including `search_path`) between
+  transactions, so an unqualified table name in a `$queryRaw` would
+  intermittently resolve to the wrong schema and 42P01 under load. Every
+  hand-written statement qualifies its tables (`"<schema>".posts`, via
+  `config.dbSchema`) — exactly what Prisma already does for its ORM queries —
+  and the counter triggers do the same via `TG_TABLE_SCHEMA`. This keeps the
+  single-round-trip reads correct at any replica count with no extra query.
 - **Stateless auth** — any number of horizontal API replicas without shared
-  session state. At larger scale, like/comment counts would denormalize onto
-  posts and the hot first feed page would cache in Redis; the current shape
-  makes both drop-in changes.
+  session state. With the counts denormalized and the hot page cached, the
+  remaining scale-out is operational: Postgres **read replicas** for the
+  read-heavy feed traffic, a **CDN** in front of cacheable GETs (images already
+  CDN-served), co-locating the API with the DB region, and — only if the product
+  grows a follow graph — fan-out-on-write feeds.
 
 ## Structure
 
@@ -207,10 +252,13 @@ prisma/schema.prisma            # User + Post models
 src/
   server.ts                     # bootstrap + graceful shutdown
   app.ts                        # middleware + module route wiring
-  config.ts                     # env loading + fail-fast validation
+  config.ts                     # env loading + fail-fast validation (optional storage/redis)
   lib/prisma.ts                 # shared Prisma client (connection pool)
+  lib/redis.ts                  # shared optional ioredis client (cache + rate limit)
+  lib/cache.ts                  # feed cache: Redis when configured, in-memory fallback
   middleware/
     auth.ts                     # requireAuth (cookie or Bearer)
+    rateLimit.ts                # auth + write limiters (Redis-backed when configured)
     validate.ts                 # generic Zod body validation
     error.ts                    # ZodError→400, HttpError→status, else 500
   utils/
