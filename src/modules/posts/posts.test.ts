@@ -552,3 +552,96 @@ describe('post reactions (typed)', () => {
     expect(unreacted.body.reactions).toEqual([{ type: 'LOVE', count: 1 }]);
   });
 });
+
+// likeCount/commentCount are denormalized columns on `posts`, maintained by
+// AFTER INSERT/DELETE triggers on post_likes and comments. These tests assert
+// the column never drifts from the source-of-truth row counts across the full
+// lifecycle: like, reaction switch (an UPDATE — must NOT change like_count),
+// comment, reply, unlike, and cascade delete.
+describe('denormalized post counters (trigger-maintained)', () => {
+  async function liveCounts(postId: string) {
+    const id = BigInt(postId);
+    const [likes, comments, post] = await Promise.all([
+      prisma.postLike.count({ where: { postId: id } }),
+      prisma.comment.count({ where: { postId: id } }),
+      prisma.post.findUnique({
+        where: { id },
+        select: { likeCount: true, commentCount: true },
+      }),
+    ]);
+    return { likes, comments, column: post };
+  }
+
+  // Local helpers that assert each mutating request succeeded — so a transient
+  // failure surfaces as a clear status error instead of a downstream
+  // `undefined` read, and the count assertions only run on confirmed writes.
+  async function react(cookie: string, postId: string, type: string) {
+    const res = await request(app).post(`/api/posts/${postId}/like`).set('Cookie', cookie).send({ type });
+    expect(res.status, `react ${type} -> ${JSON.stringify(res.body)}`).toBe(200);
+    return res.body;
+  }
+  async function unreact(cookie: string, postId: string) {
+    const res = await request(app).delete(`/api/posts/${postId}/like`).set('Cookie', cookie);
+    expect(res.status, `unreact -> ${JSON.stringify(res.body)}`).toBe(200);
+    return res.body;
+  }
+  async function comment(cookie: string, postId: string, content: string, parentId?: string) {
+    const res = await request(app)
+      .post(`/api/posts/${postId}/comments`)
+      .set('Cookie', cookie)
+      .send(parentId ? { content, parentId } : { content });
+    expect(res.status, `comment -> ${JSON.stringify(res.body)}`).toBe(201);
+    return res.body.comment;
+  }
+
+  it('keeps like_count/comment_count exact through a multi-user lifecycle', async () => {
+    const author = await registerUser();
+    const other = await registerUser();
+    const post = await createPost(author.cookie);
+
+    // Two reactions from two users, one comment + one reply.
+    await react(author.cookie, post.id, 'LIKE');
+    await react(other.cookie, post.id, 'WOW');
+    const c1 = await comment(author.cookie, post.id, 'top-level');
+    await comment(other.cookie, post.id, 'a reply', c1.id);
+
+    let s = await liveCounts(post.id);
+    expect(s.column).toEqual({ likeCount: 2, commentCount: 2 });
+    expect(s.column.likeCount).toBe(s.likes);
+    expect(s.column.commentCount).toBe(s.comments);
+
+    // A reaction SWITCH is an UPDATE, not insert/delete — like_count must stay 2.
+    await react(author.cookie, post.id, 'ANGRY');
+    s = await liveCounts(post.id);
+    expect(s.column.likeCount).toBe(2);
+
+    // Un-react drops like_count to 1.
+    await unreact(other.cookie, post.id);
+    s = await liveCounts(post.id);
+    expect(s.column.likeCount).toBe(1);
+    expect(s.column.likeCount).toBe(s.likes);
+
+    // The API DTO reads the same column — confirm it agrees end-to-end.
+    const dto = await request(app).get(`/api/posts/${post.id}`).set('Cookie', author.cookie);
+    expect(dto.body.post.likeCount).toBe(1);
+    expect(dto.body.post.commentCount).toBe(2);
+  });
+
+  it('decrements comment_count when a parent comment cascade-deletes its replies', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie);
+
+    const parent = await comment(author.cookie, post.id, 'parent');
+    await comment(author.cookie, post.id, 'reply', parent.id);
+
+    let s = await liveCounts(post.id);
+    expect(s.column.commentCount).toBe(2);
+
+    // Deleting the parent cascades to the reply; the DELETE trigger must fire
+    // for both rows so comment_count returns to 0.
+    await prisma.comment.delete({ where: { id: BigInt(parent.id) } });
+    s = await liveCounts(post.id);
+    expect(s.column.commentCount).toBe(0);
+    expect(s.column.commentCount).toBe(s.comments);
+  });
+});

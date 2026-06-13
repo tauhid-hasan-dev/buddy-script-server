@@ -120,3 +120,48 @@ describe('GET /api/feed', () => {
     expect(ids1.filter((id: string) => ids2.includes(id))).toHaveLength(0);
   });
 });
+
+// The default first page (no cursor, limit 20) is cached per viewer for a short
+// window. These verify (a) the cache is actually serving — a post inserted
+// straight into the DB, bypassing the API's invalidation, does NOT appear in
+// the still-cached page — and (b) the viewer's own API write invalidates their
+// cache, so they never see their own action go missing.
+describe('GET /api/feed (first-page cache)', () => {
+  const feed20 = (cookie: string) =>
+    request(app).get('/api/feed').set('Cookie', cookie); // no params → default limit 20
+
+  it('serves the cached first page (a direct DB insert is not seen until TTL/invalidation)', async () => {
+    const viewer = await registerUser();
+
+    // Prime the cache.
+    const first = await feed20(viewer.cookie);
+    expect(first.status).toBe(200);
+
+    // Insert a public post straight into the DB — this does NOT go through the
+    // API, so it does NOT invalidate the viewer's cached page.
+    const sneaky = await prisma.post.create({
+      data: { authorId: viewer.id, content: 'direct-db-insert-should-be-cached-out', visibility: 'PUBLIC' },
+      select: { id: true },
+    });
+
+    const cached = await feed20(viewer.cookie);
+    expect(cached.status).toBe(200);
+    expect(feedContents(cached.body)).not.toContain('direct-db-insert-should-be-cached-out');
+
+    await prisma.post.delete({ where: { id: sneaky.id } });
+  });
+
+  it('invalidates the cache on the viewer’s own write (API create)', async () => {
+    const viewer = await registerUser();
+
+    // Prime the cache.
+    await feed20(viewer.cookie);
+
+    // Creating through the API invalidates this viewer's cached first page.
+    await createPost(viewer.cookie, 'my-own-post-after-cache');
+
+    const refreshed = await feed20(viewer.cookie);
+    expect(refreshed.status).toBe(200);
+    expect(feedContents(refreshed.body)).toContain('my-own-post-after-cache');
+  });
+});

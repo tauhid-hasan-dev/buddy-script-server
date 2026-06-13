@@ -1,7 +1,16 @@
 import { Prisma, type ReactionType, type Visibility } from '@prisma/client';
 import prisma from '../../lib/prisma';
+import config from '../../config';
+import { cache, feedFirstPageKey } from '../../lib/cache';
 import { StorageService } from '../../lib/storage';
 import HttpError from '../../utils/httpError';
+
+// Schema qualifier for raw SQL. The Supabase transaction pooler resets the
+// session search_path between transactions, so unqualified table names in
+// $queryRaw intermittently fail with 42P01 ("relation does not exist"). Prisma
+// schema-qualifies its own ORM SQL; we do the same here. Empty for the default
+// `public` schema. config.dbSchema is validated to a plain identifier.
+const T = Prisma.raw(config.dbSchema === 'public' ? '' : `"${config.dbSchema}".`);
 import type {
   ICreatePostInput,
   ILikersPage,
@@ -23,7 +32,10 @@ export function postSelect(viewerId: string) {
     visibility: true,
     createdAt: true,
     author: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
-    _count: { select: { likes: true, comments: true } },
+    // Denormalized counters (maintained by DB triggers) instead of a _count
+    // aggregate subquery — O(1) column reads, identical DTO shape.
+    likeCount: true,
+    commentCount: true,
     likes: { where: { userId: viewerId }, select: { type: true } },
   } satisfies Prisma.PostSelect;
 }
@@ -39,8 +51,8 @@ export function toPostDto(post: PostRow, reactions: IReactionCount[] = []): IPos
     visibility: post.visibility,
     createdAt: post.createdAt,
     author: post.author,
-    likeCount: post._count.likes,
-    commentCount: post._count.comments,
+    likeCount: post.likeCount,
+    commentCount: post.commentCount,
     likedByMe: post.likes.length > 0,
     myReaction: mine ? mine.type : null,
     reactions,
@@ -77,18 +89,18 @@ export function postProjection(viewerId: string): Prisma.Sql {
       p.visibility,
       p.created_at,
       json_build_object('id', u.id, 'firstName', u.first_name, 'lastName', u.last_name, 'avatarUrl', u.avatar_url) AS author,
-      (SELECT count(*)::int FROM post_likes pl WHERE pl.post_id = p.id) AS like_count,
-      (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id) AS comment_count,
-      (SELECT pl.type FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${viewerId}::uuid) AS my_reaction,
+      p.like_count,
+      p.comment_count,
+      (SELECT pl.type FROM ${T}post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${viewerId}::uuid) AS my_reaction,
       COALESCE((
         SELECT json_agg(json_build_object('type', t.type, 'count', t.count) ORDER BY t.count DESC, t.type)
         FROM (
           SELECT type, count(*)::int AS count
-          FROM post_likes pl WHERE pl.post_id = p.id GROUP BY type
+          FROM ${T}post_likes pl WHERE pl.post_id = p.id GROUP BY type
         ) t
       ), '[]'::json) AS reactions
-    FROM posts p
-    JOIN users u ON u.id = p.author_id
+    FROM ${T}posts p
+    JOIN ${T}users u ON u.id = p.author_id
   `;
 }
 
@@ -142,6 +154,9 @@ async function create(
       select: postSelect(authorId),
     });
     // A brand-new post has no reactions yet — skip the breakdown query.
+    // The author's cached feed is now stale (missing this post); drop it so
+    // their next load is fresh. Best-effort — a cache miss is harmless.
+    void cache.del(feedFirstPageKey(authorId));
     return toPostDto(post, []);
   } catch (err) {
     if (imageUrl) void StorageService.removeImage(imageUrl);
@@ -187,9 +202,9 @@ async function update(
 ): Promise<IPostDto> {
   const rows = await prisma.$queryRaw<(IPostRawRow & { owned: boolean })[]>(Prisma.sql`
     WITH upd AS (
-      UPDATE posts SET
+      UPDATE ${T}posts SET
         content = COALESCE(${input.content ?? null}, content),
-        visibility = COALESCE(${input.visibility ?? null}::"Visibility", visibility),
+        visibility = COALESCE(${input.visibility ?? null}::${T}"Visibility", visibility),
         updated_at = now()
       WHERE id = ${postId} AND author_id = ${userId}::uuid
       RETURNING content, visibility
@@ -202,18 +217,18 @@ async function update(
       COALESCE((SELECT visibility FROM upd), p.visibility) AS visibility,
       p.created_at,
       json_build_object('id', u.id, 'firstName', u.first_name, 'lastName', u.last_name, 'avatarUrl', u.avatar_url) AS author,
-      (SELECT count(*)::int FROM post_likes pl WHERE pl.post_id = p.id) AS like_count,
-      (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id) AS comment_count,
-      (SELECT pl.type FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${userId}::uuid) AS my_reaction,
+      p.like_count,
+      p.comment_count,
+      (SELECT pl.type FROM ${T}post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${userId}::uuid) AS my_reaction,
       COALESCE((
         SELECT json_agg(json_build_object('type', t.type, 'count', t.count) ORDER BY t.count DESC, t.type)
         FROM (
           SELECT type, count(*)::int AS count
-          FROM post_likes pl WHERE pl.post_id = p.id GROUP BY type
+          FROM ${T}post_likes pl WHERE pl.post_id = p.id GROUP BY type
         ) t
       ), '[]'::json) AS reactions
-    FROM posts p
-    JOIN users u ON u.id = p.author_id
+    FROM ${T}posts p
+    JOIN ${T}users u ON u.id = p.author_id
     WHERE p.id = ${postId}
   `);
 
@@ -224,6 +239,8 @@ async function update(
   if (!row.owned) {
     throw new HttpError(403, 'You can only edit your own posts');
   }
+  // Edited content/visibility is now stale in the author's cached feed.
+  void cache.del(feedFirstPageKey(userId));
   return rawRowToDto(row);
 }
 
@@ -241,6 +258,7 @@ async function remove(postId: bigint, userId: string): Promise<void> {
   }
 
   await prisma.post.delete({ where: { id: postId } });
+  void cache.del(feedFirstPageKey(userId));
 }
 
 // One row from the react/unreact statements below: the visibility verdict plus
@@ -293,31 +311,31 @@ async function react(
 ): Promise<ILikeState> {
   const rows = await prisma.$queryRaw<IReactionResultRow[]>`
     WITH gate AS (
-      SELECT id FROM posts
+      SELECT id FROM ${T}posts
       WHERE id = ${postId} AND (visibility = 'PUBLIC' OR author_id = ${userId}::uuid)
     ),
     ins AS (
-      INSERT INTO post_likes (post_id, user_id, type)
-      SELECT id, ${userId}::uuid, ${type}::"ReactionType" FROM gate
+      INSERT INTO ${T}post_likes (post_id, user_id, type)
+      SELECT id, ${userId}::uuid, ${type}::${T}"ReactionType" FROM gate
       ON CONFLICT (post_id, user_id) DO UPDATE SET type = EXCLUDED.type
       RETURNING 1
     ),
     others AS (
       SELECT type, count(*)::int AS count
-      FROM post_likes
+      FROM ${T}post_likes
       WHERE post_id = ${postId} AND user_id <> ${userId}::uuid AND EXISTS (SELECT 1 FROM gate)
       GROUP BY type
     ),
     merged AS (
       SELECT type, count FROM others
       UNION ALL
-      SELECT ${type}::"ReactionType", 1 WHERE EXISTS (SELECT 1 FROM gate)
+      SELECT ${type}::${T}"ReactionType", 1 WHERE EXISTS (SELECT 1 FROM gate)
     ),
     final AS (
       SELECT type, sum(count)::int AS count FROM merged GROUP BY type
     )
     SELECT
-      EXISTS (SELECT 1 FROM posts WHERE id = ${postId}) AS post_exists,
+      EXISTS (SELECT 1 FROM ${T}posts WHERE id = ${postId}) AS post_exists,
       EXISTS (SELECT 1 FROM gate) AS visible,
       COALESCE(
         (SELECT json_agg(json_build_object('type', type, 'count', count) ORDER BY count DESC, type) FROM final),
@@ -325,7 +343,11 @@ async function react(
       ) AS reactions
   `;
 
-  return toLikeState(rows[0], type);
+  // toLikeState throws 404 for an invisible post (no write happened); if it
+  // returns, the actor's reaction changed, so refresh their cached feed.
+  const state = toLikeState(rows[0], type);
+  void cache.del(feedFirstPageKey(userId));
+  return state;
 }
 
 async function unreact(postId: bigint, userId: string): Promise<ILikeState> {
@@ -333,22 +355,22 @@ async function unreact(postId: bigint, userId: string): Promise<ILikeState> {
   // return the remaining breakdown (already excludes the actor) in one query.
   const rows = await prisma.$queryRaw<IReactionResultRow[]>`
     WITH gate AS (
-      SELECT id FROM posts
+      SELECT id FROM ${T}posts
       WHERE id = ${postId} AND (visibility = 'PUBLIC' OR author_id = ${userId}::uuid)
     ),
     del AS (
-      DELETE FROM post_likes
+      DELETE FROM ${T}post_likes
       WHERE post_id IN (SELECT id FROM gate) AND user_id = ${userId}::uuid
       RETURNING 1
     ),
     others AS (
       SELECT type, count(*)::int AS count
-      FROM post_likes
+      FROM ${T}post_likes
       WHERE post_id = ${postId} AND user_id <> ${userId}::uuid AND EXISTS (SELECT 1 FROM gate)
       GROUP BY type
     )
     SELECT
-      EXISTS (SELECT 1 FROM posts WHERE id = ${postId}) AS post_exists,
+      EXISTS (SELECT 1 FROM ${T}posts WHERE id = ${postId}) AS post_exists,
       EXISTS (SELECT 1 FROM gate) AS visible,
       COALESCE(
         (SELECT json_agg(json_build_object('type', type, 'count', count) ORDER BY count DESC, type) FROM others),
@@ -356,7 +378,9 @@ async function unreact(postId: bigint, userId: string): Promise<ILikeState> {
       ) AS reactions
   `;
 
-  return toLikeState(rows[0], null);
+  const state = toLikeState(rows[0], null);
+  void cache.del(feedFirstPageKey(userId));
+  return state;
 }
 
 async function likers(

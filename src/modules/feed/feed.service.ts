@@ -1,7 +1,17 @@
 import { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma';
+import { cache, feedFirstPageKey } from '../../lib/cache';
 import { postProjection, rawRowToDto, type IPostRawRow } from '../posts/posts.service';
 import type { IFeedPage, IFeedQuery } from './feed.interface';
+
+// The default first feed page (no cursor, default limit) is the single hottest
+// read in the system and what the web client requests on load. Cache it
+// per-viewer for a short window: bounded staleness for a social feed, and the
+// per-viewer key keeps each reader's likedByMe / myReaction private. Deeper
+// pages and non-default limits always hit the DB. Matches feedQuerySchema's
+// default of 20.
+const FEED_DEFAULT_LIMIT = 20;
+const FEED_FIRST_PAGE_TTL_SECONDS = 15;
 
 // Cursor-based pagination (WHERE id < cursor ORDER BY id DESC LIMIT n)
 // stays O(page size) no matter how deep the reader scrolls — unlike
@@ -21,6 +31,15 @@ import type { IFeedPage, IFeedQuery } from './feed.interface';
 async function getFeed(viewerId: string, query: IFeedQuery): Promise<IFeedPage> {
   const { limit, cursor } = query;
 
+  const cacheable = !cursor && limit === FEED_DEFAULT_LIMIT;
+  const cacheKey = feedFirstPageKey(viewerId);
+  if (cacheable) {
+    const cached = await cache.get(cacheKey);
+    // The page contains only JSON-safe values (ids are already strings), so a
+    // round-trip through the cache is byte-identical to a fresh res.json().
+    if (cached) return JSON.parse(cached) as IFeedPage;
+  }
+
   const rows = await prisma.$queryRaw<IPostRawRow[]>(Prisma.sql`
     ${postProjection(viewerId)}
     WHERE (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
@@ -33,10 +52,15 @@ async function getFeed(viewerId: string, query: IFeedQuery): Promise<IFeedPage> 
   const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
 
-  return {
+  const result: IFeedPage = {
     posts: page.map(rawRowToDto),
     nextCursor: hasMore && last ? last.id.toString() : null,
   };
+
+  if (cacheable) {
+    await cache.set(cacheKey, JSON.stringify(result), FEED_FIRST_PAGE_TTL_SECONDS);
+  }
+  return result;
 }
 
 export const FeedService = { getFeed };
