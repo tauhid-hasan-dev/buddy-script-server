@@ -3,7 +3,7 @@ import requireAuth from '../../middleware/auth';
 import validate from '../../middleware/validate';
 import { uploadPostImage } from '../../middleware/upload';
 import { postCommentsRouter } from '../comments/comments.route';
-import { createPostSchema } from './posts.validation';
+import { createPostSchema, updatePostSchema } from './posts.validation';
 import { PostsController } from './posts.controller';
 
 const router = Router();
@@ -15,6 +15,7 @@ router.use(requireAuth);
 router.post('/', uploadPostImage, validate(createPostSchema), PostsController.create);
 
 router.get('/:id', PostsController.getPost);
+router.patch('/:id', validate(updatePostSchema), PostsController.update);
 router.delete('/:id', PostsController.remove);
 
 router.post('/:id/like', PostsController.like);

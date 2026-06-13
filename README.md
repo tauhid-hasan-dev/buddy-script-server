@@ -50,6 +50,7 @@ skipped when `NODE_ENV=test`.
 | PATCH  | `/api/users/me`      | ✓    | Update own `firstName` / `lastName`          |
 | POST   | `/api/posts`         | ✓    | Create post: JSON or multipart with `image`  |
 | GET    | `/api/posts/:id`     | ✓    | Single post (visibility-checked)             |
+| PATCH  | `/api/posts/:id`     | ✓    | Edit own `content`/`visibility` (403 otherwise) |
 | DELETE | `/api/posts/:id`     | ✓    | Delete own post (403 otherwise)              |
 | POST   | `/api/posts/:id/like`| ✓    | Like (idempotent) → `{ liked, likeCount }`   |
 | DELETE | `/api/posts/:id/like`| ✓    | Unlike (idempotent)                          |
@@ -80,6 +81,13 @@ skipped when `NODE_ENV=test`.
 - **Comments**: one level of nesting — replies attach to a top-level comment
   (`parentId`); replies-to-replies are rejected with 400. Comments paginate
   newest-first by cursor; replies oldest-first (conversation order).
+- **Editing a post** (`PATCH`) is owner-only and partial: send `content`,
+  `visibility`, or both — an empty body is a 400, unknown fields are rejected
+  (`z.strictObject`, so a client can't smuggle `authorId`), and editing a post
+  you don't own is a 403 that leaves the row untouched. The response is the
+  same `IPostDto` shape as create/get (with the viewer's `likedByMe` and
+  counts), so the client can swap it into the feed without a refetch. Image
+  edits are out of scope — the stored `image_url` is preserved.
 
 Register and login set a `token` cookie (`HttpOnly`; `SameSite=Lax` in
 development, `SameSite=None; Secure` in production because the deployed

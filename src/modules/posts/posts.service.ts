@@ -7,6 +7,7 @@ import type {
   ILikersPage,
   ILikeState,
   IPostDto,
+  IUpdatePostInput,
 } from './posts.interface';
 
 // Shared select + mapper so the feed, single-post, and create responses all
@@ -92,6 +93,39 @@ async function getById(postId: bigint, viewerId: string): Promise<IPostDto> {
   return toPostDto(post);
 }
 
+// Edit own post's content and/or visibility. Ownership is checked the same
+// way as delete: 404 when the row doesn't exist, 403 when it isn't yours —
+// editing is an explicit owner action, so a 403 here doesn't leak anything a
+// delete wouldn't. Image edits are out of scope (kept as-is).
+async function update(
+  postId: bigint,
+  userId: string,
+  input: IUpdatePostInput
+): Promise<IPostDto> {
+  const post = await prisma.post.findUnique({
+    where: { id: postId },
+    select: { authorId: true },
+  });
+
+  if (!post) {
+    throw new HttpError(404, 'Post not found');
+  }
+  if (post.authorId !== userId) {
+    throw new HttpError(403, 'You can only edit your own posts');
+  }
+
+  const updated = await prisma.post.update({
+    where: { id: postId },
+    data: {
+      ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
+    },
+    select: postSelect(userId),
+  });
+
+  return toPostDto(updated);
+}
+
 async function remove(postId: bigint, userId: string): Promise<void> {
   const post = await prisma.post.findUnique({
     where: { id: postId },
@@ -159,4 +193,4 @@ async function likers(
   };
 }
 
-export const PostsService = { create, getById, remove, like, unlike, likers };
+export const PostsService = { create, getById, update, remove, like, unlike, likers };

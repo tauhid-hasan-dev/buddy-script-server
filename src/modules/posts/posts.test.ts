@@ -184,6 +184,130 @@ describe('GET /api/posts/:id', () => {
   });
 });
 
+describe('PATCH /api/posts/:id', () => {
+  it('lets the author edit content and visibility', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie, { content: 'before', visibility: 'PUBLIC' });
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', author.cookie)
+      .send({ content: 'after', visibility: 'private' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.post).toMatchObject({
+      id: post.id,
+      content: 'after',
+      visibility: 'PRIVATE',
+    });
+
+    const row = await prisma.post.findUnique({ where: { id: BigInt(post.id) } });
+    expect(row?.content).toBe('after');
+    expect(row?.visibility).toBe('PRIVATE');
+  });
+
+  it('allows a partial update (content only) without touching visibility', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie, { content: 'keep vis', visibility: 'PRIVATE' });
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', author.cookie)
+      .send({ content: 'edited' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.post.content).toBe('edited');
+    expect(res.body.post.visibility).toBe('PRIVATE');
+  });
+
+  it('preserves likedByMe and counts in the edit response', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie);
+    await request(app).post(`/api/posts/${post.id}/like`).set('Cookie', author.cookie);
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', author.cookie)
+      .send({ content: 'edited with like' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.post.likedByMe).toBe(true);
+    expect(res.body.post.likeCount).toBe(1);
+  });
+
+  it('400s an empty body (nothing to update)', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie);
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', author.cookie)
+      .send({});
+
+    expect(res.status).toBe(400);
+  });
+
+  it('400s unknown fields (strict body)', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie);
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', author.cookie)
+      .send({ content: 'x', authorId: 'someone-else' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('400s an invalid visibility value', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie);
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', author.cookie)
+      .send({ visibility: 'FRIENDS' });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('401s without authentication', async () => {
+    const author = await registerUser();
+    const post = await createPost(author.cookie);
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .send({ content: 'x' });
+
+    expect(res.status).toBe(401);
+  });
+
+  it("403s editing someone else's post (and leaves it unchanged)", async () => {
+    const author = await registerUser();
+    const attacker = await registerUser();
+    const post = await createPost(author.cookie, { content: 'original' });
+
+    const res = await request(app)
+      .patch(`/api/posts/${post.id}`)
+      .set('Cookie', attacker.cookie)
+      .send({ content: 'hacked' });
+
+    expect(res.status).toBe(403);
+    const row = await prisma.post.findUnique({ where: { id: BigInt(post.id) } });
+    expect(row?.content).toBe('original');
+  });
+
+  it('404s editing a non-existent post', async () => {
+    const author = await registerUser();
+    const res = await request(app)
+      .patch('/api/posts/999999999')
+      .set('Cookie', author.cookie)
+      .send({ content: 'x' });
+
+    expect(res.status).toBe(404);
+  });
+});
+
 describe('DELETE /api/posts/:id', () => {
   it('lets the author delete their own post', async () => {
     const author = await registerUser();

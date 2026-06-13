@@ -5,6 +5,13 @@ export interface ICreatePostInput {
   visibility: Visibility;
 }
 
+// Edits are partial — the client may change content, visibility, or both.
+// At least one field is required (enforced in validation).
+export interface IUpdatePostInput {
+  content?: string;
+  visibility?: Visibility;
+}
+
 export interface IPostAuthor {
   id: string;
   firstName: string;

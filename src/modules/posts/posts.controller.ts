@@ -14,6 +14,12 @@ async function getPost(req: Request, res: Response): Promise<void> {
   res.json({ post });
 }
 
+async function update(req: Request, res: Response): Promise<void> {
+  const postId = parseBigIntId(req.params.id, 'post id');
+  const post = await PostsService.update(postId, req.user!.id, req.body);
+  res.json({ post });
+}
+
 async function remove(req: Request, res: Response): Promise<void> {
   const postId = parseBigIntId(req.params.id, 'post id');
   await PostsService.remove(postId, req.user!.id);
@@ -39,4 +45,4 @@ async function likers(req: Request, res: Response): Promise<void> {
   res.json(page);
 }
 
-export const PostsController = { create, getPost, remove, like, unlike, likers };
+export const PostsController = { create, getPost, update, remove, like, unlike, likers };
