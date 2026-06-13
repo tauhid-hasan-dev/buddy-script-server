@@ -33,6 +33,10 @@ model User {
   lastName     String   @map("last_name") @db.VarChar(50)
   email        String   @unique @db.VarChar(255)
   passwordHash String   @map("password_hash") @db.VarChar(255)
+  // Public URL of the user's profile image in Supabase Storage. Nullable: a
+  // user has no avatar until they upload one (the client renders a default
+  // icon in that case). Not indexed — never filtered or joined on.
+  avatarUrl    String?  @map("avatar_url") @db.VarChar(500)
   createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz()
   updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz()
 

@@ -26,4 +26,26 @@ async function updateMe(req: Request, res: Response): Promise<void> {
   res.json({ user });
 }
 
-export const UsersController = { listUsers, getUser, updateMe };
+async function uploadAvatar(req: Request, res: Response): Promise<void> {
+  if (!req.file) {
+    throw new HttpError(400, 'An image file is required');
+  }
+  const user = await UsersService.setAvatar(req.user!.id, {
+    buffer: req.file.buffer,
+    mimetype: req.file.mimetype,
+  });
+  res.json({ user });
+}
+
+async function deleteAvatar(req: Request, res: Response): Promise<void> {
+  const user = await UsersService.removeAvatar(req.user!.id);
+  res.json({ user });
+}
+
+export const UsersController = {
+  listUsers,
+  getUser,
+  updateMe,
+  uploadAvatar,
+  deleteAvatar,
+};

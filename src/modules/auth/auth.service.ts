@@ -11,8 +11,8 @@ const BCRYPT_ROUNDS = 12;
 const DUMMY_HASH = bcrypt.hashSync('timing-equalizer-password', BCRYPT_ROUNDS);
 
 export function toPublicUser(user: User): IAuthUser {
-  const { id, firstName, lastName, email, createdAt } = user;
-  return { id, firstName, lastName, email, createdAt };
+  const { id, firstName, lastName, email, avatarUrl, createdAt } = user;
+  return { id, firstName, lastName, email, avatarUrl, createdAt };
 }
 
 async function register(input: IRegisterInput): Promise<User> {

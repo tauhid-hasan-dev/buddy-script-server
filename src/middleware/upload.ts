@@ -11,11 +11,10 @@ const ALLOWED_TYPES = new Set([
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-// Parses an optional single "image" field from multipart/form-data into an
-// in-memory buffer; the controller hands it to Supabase Storage. Nothing
-// touches local disk, so the API stays stateless across replicas.
-// Non-multipart requests (plain JSON) pass through untouched.
-export const uploadPostImage = multer({
+// Shared in-memory multer instance: the controller hands the parsed buffer to
+// Supabase Storage. Nothing touches local disk, so the API stays stateless
+// across replicas. Non-multipart requests (plain JSON) pass through untouched.
+const imageUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: MAX_IMAGE_BYTES, files: 1 },
   fileFilter: (_req, file, cb) => {
@@ -25,4 +24,10 @@ export const uploadPostImage = multer({
       cb(new HttpError(400, 'Only JPEG, PNG, WebP or GIF images are allowed'));
     }
   },
-}).single('image');
+});
+
+// Optional "image" field on post create.
+export const uploadPostImage = imageUpload.single('image');
+
+// Single "avatar" field for profile-image uploads.
+export const uploadAvatar = imageUpload.single('avatar');

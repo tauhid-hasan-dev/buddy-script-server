@@ -18,7 +18,7 @@ function commentSelect(viewerId: string) {
     parentId: true,
     content: true,
     createdAt: true,
-    author: { select: { id: true, firstName: true, lastName: true } },
+    author: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
     _count: { select: { likes: true, replies: true } },
     likes: { where: { userId: viewerId }, select: { userId: true } },
   } satisfies Prisma.CommentSelect;
@@ -192,7 +192,7 @@ async function likers(
       take: limit,
       select: {
         createdAt: true,
-        user: { select: { id: true, firstName: true, lastName: true } },
+        user: { select: { id: true, firstName: true, lastName: true, avatarUrl: true } },
       },
     }),
     prisma.commentLike.count({ where: { commentId } }),

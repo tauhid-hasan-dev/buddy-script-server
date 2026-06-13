@@ -46,8 +46,10 @@ skipped when `NODE_ENV=test`.
 | GET    | `/api/auth/me`       | ✓    | Current user                                 |
 | GET    | `/api/feed`          | ✓    | Paginated feed: `?cursor=<postId>&limit=20`  |
 | GET    | `/api/users`         | ✓    | Paginated profiles: `?page=1&limit=20`       |
-| GET    | `/api/users/:id`     | ✓    | User profile (includes email)                |
+| GET    | `/api/users/:id`     | ✓    | User profile (includes email, `avatarUrl`)   |
 | PATCH  | `/api/users/me`      | ✓    | Update own `firstName` / `lastName`          |
+| POST   | `/api/users/me/avatar`| ✓   | Upload own avatar (multipart `avatar`, ≤5MB) → `{ user }` |
+| DELETE | `/api/users/me/avatar`| ✓   | Clear own avatar back to `null`              |
 | POST   | `/api/posts`         | ✓    | Create post: JSON or multipart with `image`  |
 | GET    | `/api/posts/:id`     | ✓    | Single post (visibility-checked)             |
 | PATCH  | `/api/posts/:id`     | ✓    | Edit own `content`/`visibility` (403 otherwise) |
@@ -75,6 +77,14 @@ skipped when `NODE_ENV=test`.
   trusted — and `image_url` stores the public CDN URL. Uploads are in-memory
   buffers (no local disk), so the API stays stateless across replicas; a
   failed insert removes its just-uploaded object.
+- **Profile avatars**: every user has an optional `avatarUrl` (nullable —
+  `null` until they upload one, and the client renders a default icon in that
+  case). `POST /api/users/me/avatar` (multipart `avatar`, same MIME/size rules
+  and Supabase pipeline as post images) sets it and best-effort deletes the
+  previous object; `DELETE` clears it back to `null`. Writes target the JWT's
+  user id only — never a body/URL id. `avatarUrl` is folded into the existing
+  single-query post/comment author projection (`json_build_object`), so author
+  avatars appear in the feed with **no extra query and no N+1**.
 - **Reactions (posts)**: a post like is a Facebook-style reaction — one of
   `LIKE, LOVE, CARE, HAHA, WOW, SAD, ANGRY`. `POST /like` with an optional
   `{ type }` body sets or **switches** the viewer's reaction (a user has at
@@ -222,8 +232,8 @@ src/
     users/
       users.controller.ts
       users.interface.ts        # IPublicProfile, IUpdateProfileInput
-      users.route.ts            # GET /, GET /:id, PATCH /me (all protected)
-      users.service.ts          # profile reads + self-only updates
+      users.route.ts            # GET /, GET /:id, PATCH /me, POST/DELETE /me/avatar (protected)
+      users.service.ts          # profile reads + self-only updates + avatar set/remove
       users.validation.ts       # strict schema — unknown fields rejected
     posts/
       posts.controller.ts

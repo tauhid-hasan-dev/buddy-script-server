@@ -1,5 +1,6 @@
 import prisma from '../../lib/prisma';
 import HttpError from '../../utils/httpError';
+import { StorageService } from '../../lib/storage';
 import type { IAuthUser } from '../auth/auth.interface';
 import { toPublicUser } from '../auth/auth.service';
 import type {
@@ -25,6 +26,7 @@ async function list(query: IListUsersQuery): Promise<IUsersPage> {
         firstName: true,
         lastName: true,
         email: true,
+        avatarUrl: true,
         createdAt: true,
       },
     }),
@@ -45,6 +47,7 @@ async function getById(id: string): Promise<IPublicProfile> {
       firstName: true,
       lastName: true,
       email: true,
+      avatarUrl: true,
       createdAt: true,
     },
   });
@@ -71,4 +74,56 @@ async function updateProfile(
   return toPublicUser(user);
 }
 
-export const UsersService = { list, getById, updateProfile };
+// Upload happens after multer validated the file, so the only orphan window is
+// a failed DB update — handled by removing the just-uploaded object. On a
+// successful swap the previous avatar is deleted best-effort so storage doesn't
+// accumulate dead objects. Writes target the JWT's user id, never a body/URL id.
+async function setAvatar(
+  userId: string,
+  image: { buffer: Buffer; mimetype: string }
+): Promise<IAuthUser> {
+  const previous = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { avatarUrl: true },
+  });
+
+  const avatarUrl = await StorageService.uploadImage(image);
+
+  try {
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { avatarUrl },
+    });
+
+    if (previous?.avatarUrl) void StorageService.removeImage(previous.avatarUrl);
+    return toPublicUser(user);
+  } catch (err) {
+    void StorageService.removeImage(avatarUrl);
+    throw err;
+  }
+}
+
+// Clear the avatar (client falls back to the default icon) and best-effort
+// delete the stored object.
+async function removeAvatar(userId: string): Promise<IAuthUser> {
+  const previous = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { avatarUrl: true },
+  });
+
+  const user = await prisma.user.update({
+    where: { id: userId },
+    data: { avatarUrl: null },
+  });
+
+  if (previous?.avatarUrl) void StorageService.removeImage(previous.avatarUrl);
+  return toPublicUser(user);
+}
+
+export const UsersService = {
+  list,
+  getById,
+  updateProfile,
+  setAvatar,
+  removeAvatar,
+};

@@ -5,6 +5,7 @@ export interface IPublicProfile {
   firstName: string;
   lastName: string;
   email: string;
+  avatarUrl: string | null;
   createdAt: Date;
 }
 

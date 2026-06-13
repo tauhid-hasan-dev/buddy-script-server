@@ -1,7 +1,9 @@
 import request from 'supertest';
 import { afterAll, describe, expect, it } from 'vitest';
 import app from '../../app';
+import config from '../../config';
 import prisma from '../../lib/prisma';
+import { StorageService } from '../../lib/storage';
 
 // Distinct prefix from auth tests so the suites can't clean up each other's rows.
 const EMAIL_PREFIX = 'test_users_';
@@ -9,6 +11,11 @@ let emailCounter = 0;
 const uniqueEmail = () => `${EMAIL_PREFIX}${process.pid}_${emailCounter++}@example.com`;
 
 const PASSWORD = 'SuperSecret123';
+
+// Avatar upload hits real Supabase Storage; objects are removed in afterAll.
+const uploadedImageUrls: string[] = [];
+const storageConfigured = config.supabase !== null;
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
 async function registerUser() {
   const body = {
@@ -32,6 +39,9 @@ afterAll(async () => {
     where: { email: { startsWith: EMAIL_PREFIX } },
   });
   await prisma.$disconnect();
+  for (const url of uploadedImageUrls) {
+    await StorageService.removeImage(url);
+  }
 });
 
 describe('GET /api/users', () => {
@@ -266,5 +276,156 @@ describe('PATCH /api/users/me', () => {
     // Victim untouched — identity comes from the JWT, not anything client-sent.
     const victimRow = await prisma.user.findUnique({ where: { id: victim.id } });
     expect(victimRow?.firstName).toBe(victim.body.firstName);
+  });
+});
+
+describe('user avatar', () => {
+  it('new accounts have a null avatar (the client shows a default icon)', async () => {
+    const { cookie, id } = await registerUser();
+
+    // Surfaced on /me, in the public profile, and in the directory list.
+    const me = await request(app).get('/api/auth/me').set('Cookie', cookie);
+    expect(me.status).toBe(200);
+    expect(me.body.user.avatarUrl).toBeNull();
+
+    const profile = await request(app).get(`/api/users/${id}`).set('Cookie', cookie);
+    expect(profile.body.user.avatarUrl).toBeNull();
+  });
+
+  describe('POST /api/users/me/avatar', () => {
+    it('returns 401 without authentication', async () => {
+      const res = await request(app)
+        .post('/api/users/me/avatar')
+        .attach('avatar', PNG_BYTES, 'a.png');
+      expect(res.status).toBe(401);
+    });
+
+    it('returns 400 when no file is attached', async () => {
+      const { cookie } = await registerUser();
+      const res = await request(app)
+        .post('/api/users/me/avatar')
+        .set('Cookie', cookie);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('An image file is required');
+    });
+
+    it('rejects non-image uploads', async () => {
+      const { cookie } = await registerUser();
+      const res = await request(app)
+        .post('/api/users/me/avatar')
+        .set('Cookie', cookie)
+        .attach('avatar', Buffer.from('not an image'), 'malware.txt');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/JPEG, PNG, WebP or GIF/);
+    });
+
+    it.skipIf(!storageConfigured)(
+      'uploads an avatar, persists it, and surfaces it everywhere the author appears',
+      async () => {
+        const { cookie, id } = await registerUser();
+
+        const res = await request(app)
+          .post('/api/users/me/avatar')
+          .set('Cookie', cookie)
+          .attach('avatar', PNG_BYTES, 'me.png');
+
+        expect(res.status).toBe(200);
+        expect(res.body.user.id).toBe(id);
+        expect(res.body.user.avatarUrl).toMatch(
+          /\/storage\/v1\/object\/public\/.+\.png$/
+        );
+        expect(JSON.stringify(res.body)).not.toContain('Hash');
+        uploadedImageUrls.push(res.body.user.avatarUrl);
+        const avatarUrl = res.body.user.avatarUrl as string;
+
+        // Persisted to the row.
+        const row = await prisma.user.findUnique({ where: { id } });
+        expect(row?.avatarUrl).toBe(avatarUrl);
+
+        // Surfaced on /me.
+        const me = await request(app).get('/api/auth/me').set('Cookie', cookie);
+        expect(me.body.user.avatarUrl).toBe(avatarUrl);
+
+        // Surfaced as the post author's avatar — verifies the single-query
+        // feed/post projection carries avatar_url with no extra round-trip.
+        const created = await request(app)
+          .post('/api/posts')
+          .set('Cookie', cookie)
+          .send({ content: 'post by a user with an avatar' });
+        expect(created.status).toBe(201);
+        const postId = created.body.post.id as string;
+        expect(created.body.post.author.avatarUrl).toBe(avatarUrl);
+
+        const fetched = await request(app)
+          .get(`/api/posts/${postId}`)
+          .set('Cookie', cookie);
+        expect(fetched.body.post.author.avatarUrl).toBe(avatarUrl);
+
+        // And as the comment author's avatar.
+        const comment = await request(app)
+          .post(`/api/posts/${postId}/comments`)
+          .set('Cookie', cookie)
+          .send({ content: 'a comment' });
+        expect(comment.status).toBe(201);
+        expect(comment.body.comment.author.avatarUrl).toBe(avatarUrl);
+      }
+    );
+
+    it.skipIf(!storageConfigured)(
+      'replaces an existing avatar with the new one',
+      async () => {
+        const { cookie, id } = await registerUser();
+
+        const first = await request(app)
+          .post('/api/users/me/avatar')
+          .set('Cookie', cookie)
+          .attach('avatar', PNG_BYTES, 'first.png');
+        uploadedImageUrls.push(first.body.user.avatarUrl);
+
+        const second = await request(app)
+          .post('/api/users/me/avatar')
+          .set('Cookie', cookie)
+          .attach('avatar', PNG_BYTES, 'second.png');
+        uploadedImageUrls.push(second.body.user.avatarUrl);
+
+        expect(second.status).toBe(200);
+        expect(second.body.user.avatarUrl).not.toBe(first.body.user.avatarUrl);
+
+        const row = await prisma.user.findUnique({ where: { id } });
+        expect(row?.avatarUrl).toBe(second.body.user.avatarUrl);
+      }
+    );
+  });
+
+  describe('DELETE /api/users/me/avatar', () => {
+    it('returns 401 without authentication', async () => {
+      const res = await request(app).delete('/api/users/me/avatar');
+      expect(res.status).toBe(401);
+    });
+
+    it.skipIf(!storageConfigured)(
+      'clears the avatar back to null',
+      async () => {
+        const { cookie, id } = await registerUser();
+
+        const up = await request(app)
+          .post('/api/users/me/avatar')
+          .set('Cookie', cookie)
+          .attach('avatar', PNG_BYTES, 'temp.png');
+        uploadedImageUrls.push(up.body.user.avatarUrl);
+
+        const res = await request(app)
+          .delete('/api/users/me/avatar')
+          .set('Cookie', cookie);
+
+        expect(res.status).toBe(200);
+        expect(res.body.user.avatarUrl).toBeNull();
+
+        const row = await prisma.user.findUnique({ where: { id } });
+        expect(row?.avatarUrl).toBeNull();
+      }
+    );
   });
 });

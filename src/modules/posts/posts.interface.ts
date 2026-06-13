@@ -16,6 +16,10 @@ export interface IPostAuthor {
   id: string;
   firstName: string;
   lastName: string;
+  // Public URL of the author's profile image, or null when they have none
+  // (the client shows a default icon). Shared by post authors, comment
+  // authors, and likers.
+  avatarUrl: string | null;
 }
 
 // Per-type tally shown as the stacked reaction faces above the action bar,
