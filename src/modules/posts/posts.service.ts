@@ -181,14 +181,32 @@ async function remove(postId: bigint, userId: string): Promise<void> {
   await prisma.post.delete({ where: { id: postId } });
 }
 
-// Summarize a post's reactions after a write, deriving likeCount from the
-// breakdown so we don't issue a separate COUNT query.
-async function reactionState(
-  postId: bigint,
+// One row from the react/unreact statements below: the visibility verdict plus
+// the post-write reaction breakdown, computed server-side in a single trip.
+interface IReactionResultRow {
+  post_exists: boolean;
+  visible: boolean;
+  reactions: IReactionCount[];
+}
+
+// Turn the single-statement result into the API's ILikeState, enforcing the
+// same visibility rule assertPostVisible does: a private post seen by anyone
+// but its author 404s (a 403 would confirm it exists). Because the gate lives
+// inside the SQL, an invisible post simply performs no write — we just reject
+// here before returning its (unsent) breakdown.
+function toLikeState(
+  row: IReactionResultRow | undefined,
   myReaction: ReactionType | null
-): Promise<ILikeState> {
-  const map = await reactionBreakdown([postId]);
-  const reactions = map.get(postId.toString()) ?? [];
+): ILikeState {
+  // The statement always returns one row (scalar EXISTS columns); a missing
+  // row would mean the query itself failed to run.
+  if (!row) {
+    throw new HttpError(500, 'Reaction update failed');
+  }
+  if (!row.visible) {
+    throw new HttpError(404, 'Post not found');
+  }
+  const reactions = row.reactions;
   const likeCount = reactions.reduce((sum, entry) => sum + entry.count, 0);
   return { liked: myReaction !== null, likeCount, myReaction, reactions };
 }
@@ -197,28 +215,86 @@ async function reactionState(
 // (one per user via the composite PK), un-reacting a post you haven't reacted
 // to is a no-op — double-taps and retries never surface failures. A bare
 // /like with no body defaults to LIKE, preserving the original endpoint.
+//
+// Both run as ONE round-trip. The remote DB is ~140ms away and the connection
+// pooler adds per-query overhead, so the old visibility-check → write →
+// breakdown sequence cost three serial trips (~2.1s observed). Folding all
+// three into a single statement cuts that to one (~0.7s). The data-modifying
+// CTE can't see its own write (Postgres evaluates every CTE against the same
+// snapshot), so the breakdown is built from *everyone except the actor* and
+// the actor's known new reaction is added back (+1) — correct without reading
+// the row we just wrote. The (post_id, type) index serves the GROUP BY.
 async function react(
   postId: bigint,
   userId: string,
   type: ReactionType
 ): Promise<ILikeState> {
-  await assertPostVisible(postId, userId);
+  const rows = await prisma.$queryRaw<IReactionResultRow[]>`
+    WITH gate AS (
+      SELECT id FROM posts
+      WHERE id = ${postId} AND (visibility = 'PUBLIC' OR author_id = ${userId}::uuid)
+    ),
+    ins AS (
+      INSERT INTO post_likes (post_id, user_id, type)
+      SELECT id, ${userId}::uuid, ${type}::"ReactionType" FROM gate
+      ON CONFLICT (post_id, user_id) DO UPDATE SET type = EXCLUDED.type
+      RETURNING 1
+    ),
+    others AS (
+      SELECT type, count(*)::int AS count
+      FROM post_likes
+      WHERE post_id = ${postId} AND user_id <> ${userId}::uuid AND EXISTS (SELECT 1 FROM gate)
+      GROUP BY type
+    ),
+    merged AS (
+      SELECT type, count FROM others
+      UNION ALL
+      SELECT ${type}::"ReactionType", 1 WHERE EXISTS (SELECT 1 FROM gate)
+    ),
+    final AS (
+      SELECT type, sum(count)::int AS count FROM merged GROUP BY type
+    )
+    SELECT
+      EXISTS (SELECT 1 FROM posts WHERE id = ${postId}) AS post_exists,
+      EXISTS (SELECT 1 FROM gate) AS visible,
+      COALESCE(
+        (SELECT json_agg(json_build_object('type', type, 'count', count) ORDER BY count DESC, type) FROM final),
+        '[]'::json
+      ) AS reactions
+  `;
 
-  await prisma.postLike.upsert({
-    where: { postId_userId: { postId, userId } },
-    create: { postId, userId, type },
-    update: { type },
-  });
-
-  return reactionState(postId, type);
+  return toLikeState(rows[0], type);
 }
 
 async function unreact(postId: bigint, userId: string): Promise<ILikeState> {
-  await assertPostVisible(postId, userId);
+  // Same single-trip shape as react(): gate, delete the actor's row, and
+  // return the remaining breakdown (already excludes the actor) in one query.
+  const rows = await prisma.$queryRaw<IReactionResultRow[]>`
+    WITH gate AS (
+      SELECT id FROM posts
+      WHERE id = ${postId} AND (visibility = 'PUBLIC' OR author_id = ${userId}::uuid)
+    ),
+    del AS (
+      DELETE FROM post_likes
+      WHERE post_id IN (SELECT id FROM gate) AND user_id = ${userId}::uuid
+      RETURNING 1
+    ),
+    others AS (
+      SELECT type, count(*)::int AS count
+      FROM post_likes
+      WHERE post_id = ${postId} AND user_id <> ${userId}::uuid AND EXISTS (SELECT 1 FROM gate)
+      GROUP BY type
+    )
+    SELECT
+      EXISTS (SELECT 1 FROM posts WHERE id = ${postId}) AS post_exists,
+      EXISTS (SELECT 1 FROM gate) AS visible,
+      COALESCE(
+        (SELECT json_agg(json_build_object('type', type, 'count', count) ORDER BY count DESC, type) FROM others),
+        '[]'::json
+      ) AS reactions
+  `;
 
-  await prisma.postLike.deleteMany({ where: { postId, userId } });
-
-  return reactionState(postId, null);
+  return toLikeState(rows[0], null);
 }
 
 async function likers(

@@ -510,4 +510,41 @@ describe('post reactions (typed)', () => {
 
     expect(res.status).toBe(400);
   });
+
+  // The react/unreact response is built in a single statement that derives the
+  // breakdown from everyone *except* the actor, then folds the actor's own
+  // reaction back in. This asserts that fold is correct when other users have
+  // already reacted — the case the single-trip rewrite has to get right.
+  it('react/unreact responses reflect other users existing reactions', async () => {
+    const author = await registerUser();
+    const other = await registerUser();
+    const post = await createPost(author.cookie);
+
+    // Another user reacts first.
+    await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', other.cookie)
+      .send({ type: 'LOVE' });
+
+    // The actor's react response must include the other user's reaction, not
+    // just its own — count 2 total, both types present (count desc, then type).
+    const reacted = await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', author.cookie)
+      .send({ type: 'LIKE' });
+    expect(reacted.status).toBe(200);
+    expect(reacted.body).toMatchObject({ liked: true, likeCount: 2, myReaction: 'LIKE' });
+    expect(reacted.body.reactions).toEqual([
+      { type: 'LIKE', count: 1 },
+      { type: 'LOVE', count: 1 },
+    ]);
+
+    // After the actor un-reacts, only the other user's reaction remains.
+    const unreacted = await request(app)
+      .delete(`/api/posts/${post.id}/like`)
+      .set('Cookie', author.cookie);
+    expect(unreacted.status).toBe(200);
+    expect(unreacted.body).toMatchObject({ liked: false, likeCount: 1, myReaction: null });
+    expect(unreacted.body.reactions).toEqual([{ type: 'LOVE', count: 1 }]);
+  });
 });

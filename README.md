@@ -154,6 +154,17 @@ bad credentials / missing auth → 401.
   one row per post). The per-type **tally** for a whole feed page is one extra
   `GROUP BY (post_id, type)` query over the page's ids — O(reactions on the
   page), so the feed stays at two queries regardless of page size.
+- **React/un-react are one round-trip**: the database is remote, so each query
+  pays real network + pooler latency (≈700ms observed in dev). The naive
+  visibility-check → upsert → breakdown sequence is three *serial* trips (~2.1s);
+  folding them into a single SQL statement (a CTE that gates visibility, does
+  the `ON CONFLICT` upsert/delete, and returns the per-type tally as JSON) cuts
+  that to one (~0.7s, ~3× faster). Postgres evaluates every CTE against the same
+  snapshot, so a data-modifying CTE can't see its own write — the breakdown is
+  built from *all reactors except the actor* and the actor's known new reaction
+  is added back, which is correct without re-reading the just-written row. The
+  visibility 404 rule is preserved inside the statement (an invisible post
+  performs no write and the handler rejects before returning anything).
 - **Stateless auth** — any number of horizontal API replicas without shared
   session state. At larger scale, like/comment counts would denormalize onto
   posts and the hot first feed page would cache in Redis; the current shape
