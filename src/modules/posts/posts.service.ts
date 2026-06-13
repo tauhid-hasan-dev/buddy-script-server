@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client';
+import { Prisma, type ReactionType } from '@prisma/client';
 import prisma from '../../lib/prisma';
 import { StorageService } from '../../lib/storage';
 import HttpError from '../../utils/httpError';
@@ -7,12 +7,13 @@ import type {
   ILikersPage,
   ILikeState,
   IPostDto,
+  IReactionCount,
   IUpdatePostInput,
 } from './posts.interface';
 
 // Shared select + mapper so the feed, single-post, and create responses all
-// have the identical shape. The viewer's own like is fetched as a filtered
-// relation (at most one row) — likedByMe without an extra query.
+// have the identical shape. The viewer's own reaction is fetched as a filtered
+// relation (at most one row) — myReaction/likedByMe without an extra query.
 export function postSelect(viewerId: string) {
   return {
     id: true,
@@ -22,13 +23,42 @@ export function postSelect(viewerId: string) {
     createdAt: true,
     author: { select: { id: true, firstName: true, lastName: true } },
     _count: { select: { likes: true, comments: true } },
-    likes: { where: { userId: viewerId }, select: { userId: true } },
+    likes: { where: { userId: viewerId }, select: { type: true } },
   } satisfies Prisma.PostSelect;
 }
 
 type PostRow = Prisma.PostGetPayload<{ select: ReturnType<typeof postSelect> }>;
 
-export function toPostDto(post: PostRow): IPostDto {
+// Per-type reaction tallies for a set of posts, in one indexed GROUP BY query
+// (post_likes_post_id_type_idx) — O(distinct reactions on the page), so the
+// feed stays cheap no matter how many posts exist. Each list is ordered
+// most-popular-first for the stacked-faces summary the client renders.
+export async function reactionBreakdown(
+  postIds: bigint[]
+): Promise<Map<string, IReactionCount[]>> {
+  const map = new Map<string, IReactionCount[]>();
+  if (postIds.length === 0) return map;
+
+  const groups = await prisma.postLike.groupBy({
+    by: ['postId', 'type'],
+    where: { postId: { in: postIds } },
+    _count: { _all: true },
+  });
+
+  for (const group of groups) {
+    const key = group.postId.toString();
+    const list = map.get(key) ?? [];
+    list.push({ type: group.type, count: group._count._all });
+    map.set(key, list);
+  }
+  for (const list of map.values()) {
+    list.sort((a, b) => b.count - a.count);
+  }
+  return map;
+}
+
+export function toPostDto(post: PostRow, reactions: IReactionCount[] = []): IPostDto {
+  const mine = post.likes[0];
   return {
     id: post.id.toString(),
     content: post.content,
@@ -39,10 +69,18 @@ export function toPostDto(post: PostRow): IPostDto {
     likeCount: post._count.likes,
     commentCount: post._count.comments,
     likedByMe: post.likes.length > 0,
+    myReaction: mine ? mine.type : null,
+    reactions,
   };
 }
 
-// Visibility gate used by every post interaction (read, like, comment).
+// Single-post DTO: load the row's reaction breakdown and map it.
+async function dtoForRow(post: PostRow): Promise<IPostDto> {
+  const map = await reactionBreakdown([post.id]);
+  return toPostDto(post, map.get(post.id.toString()) ?? []);
+}
+
+// Visibility gate used by every post interaction (read, react, comment).
 // Private posts 404 for everyone but the author — a 403 would confirm the
 // post exists, which is itself a leak.
 export async function assertPostVisible(
@@ -75,7 +113,8 @@ async function create(
       data: { authorId, content: input.content, visibility: input.visibility, imageUrl },
       select: postSelect(authorId),
     });
-    return toPostDto(post);
+    // A brand-new post has no reactions yet — skip the breakdown query.
+    return toPostDto(post, []);
   } catch (err) {
     if (imageUrl) void StorageService.removeImage(imageUrl);
     throw err;
@@ -90,7 +129,7 @@ async function getById(postId: bigint, viewerId: string): Promise<IPostDto> {
     select: postSelect(viewerId),
   });
 
-  return toPostDto(post);
+  return dtoForRow(post);
 }
 
 // Edit own post's content and/or visibility. Ownership is checked the same
@@ -123,7 +162,7 @@ async function update(
     select: postSelect(userId),
   });
 
-  return toPostDto(updated);
+  return dtoForRow(updated);
 }
 
 async function remove(postId: bigint, userId: string): Promise<void> {
@@ -142,27 +181,44 @@ async function remove(postId: bigint, userId: string): Promise<void> {
   await prisma.post.delete({ where: { id: postId } });
 }
 
-// Like/unlike are idempotent: liking twice or unliking a non-liked post is a
-// no-op, not an error — double-taps and retries shouldn't surface failures.
-async function like(postId: bigint, userId: string): Promise<ILikeState> {
-  await assertPostVisible(postId, userId);
-
-  await prisma.postLike.createMany({
-    data: [{ postId, userId }],
-    skipDuplicates: true,
-  });
-
-  const likeCount = await prisma.postLike.count({ where: { postId } });
-  return { liked: true, likeCount };
+// Summarize a post's reactions after a write, deriving likeCount from the
+// breakdown so we don't issue a separate COUNT query.
+async function reactionState(
+  postId: bigint,
+  myReaction: ReactionType | null
+): Promise<ILikeState> {
+  const map = await reactionBreakdown([postId]);
+  const reactions = map.get(postId.toString()) ?? [];
+  const likeCount = reactions.reduce((sum, entry) => sum + entry.count, 0);
+  return { liked: myReaction !== null, likeCount, myReaction, reactions };
 }
 
-async function unlike(postId: bigint, userId: string): Promise<ILikeState> {
+// React / un-react are idempotent: reacting replaces any existing reaction
+// (one per user via the composite PK), un-reacting a post you haven't reacted
+// to is a no-op — double-taps and retries never surface failures. A bare
+// /like with no body defaults to LIKE, preserving the original endpoint.
+async function react(
+  postId: bigint,
+  userId: string,
+  type: ReactionType
+): Promise<ILikeState> {
+  await assertPostVisible(postId, userId);
+
+  await prisma.postLike.upsert({
+    where: { postId_userId: { postId, userId } },
+    create: { postId, userId, type },
+    update: { type },
+  });
+
+  return reactionState(postId, type);
+}
+
+async function unreact(postId: bigint, userId: string): Promise<ILikeState> {
   await assertPostVisible(postId, userId);
 
   await prisma.postLike.deleteMany({ where: { postId, userId } });
 
-  const likeCount = await prisma.postLike.count({ where: { postId } });
-  return { liked: false, likeCount };
+  return reactionState(postId, null);
 }
 
 async function likers(
@@ -181,6 +237,7 @@ async function likers(
       take: limit,
       select: {
         createdAt: true,
+        type: true,
         user: { select: { id: true, firstName: true, lastName: true } },
       },
     }),
@@ -188,9 +245,9 @@ async function likers(
   ]);
 
   return {
-    likes: rows.map((row) => ({ likedAt: row.createdAt, user: row.user })),
+    likes: rows.map((row) => ({ likedAt: row.createdAt, type: row.type, user: row.user })),
     meta: { page, limit, total, totalPages: Math.ceil(total / limit) },
   };
 }
 
-export const PostsService = { create, getById, update, remove, like, unlike, likers };
+export const PostsService = { create, getById, update, remove, react, unreact, likers };

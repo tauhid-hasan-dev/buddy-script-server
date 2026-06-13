@@ -2,9 +2,10 @@ import { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma';
 import HttpError from '../../utils/httpError';
 import { assertPostVisible } from '../posts/posts.service';
-import type { ILikersPage, ILikeState } from '../posts/posts.interface';
 import type {
   ICommentDto,
+  ICommentLikersPage,
+  ICommentLikeState,
   ICommentsPage,
   ICreateCommentInput,
   IRepliesPage,
@@ -154,7 +155,7 @@ async function listReplies(
   };
 }
 
-async function like(commentId: bigint, userId: string): Promise<ILikeState> {
+async function like(commentId: bigint, userId: string): Promise<ICommentLikeState> {
   await assertCommentVisible(commentId, userId);
 
   await prisma.commentLike.createMany({
@@ -166,7 +167,7 @@ async function like(commentId: bigint, userId: string): Promise<ILikeState> {
   return { liked: true, likeCount };
 }
 
-async function unlike(commentId: bigint, userId: string): Promise<ILikeState> {
+async function unlike(commentId: bigint, userId: string): Promise<ICommentLikeState> {
   await assertCommentVisible(commentId, userId);
 
   await prisma.commentLike.deleteMany({ where: { commentId, userId } });
@@ -179,7 +180,7 @@ async function likers(
   commentId: bigint,
   viewerId: string,
   query: { page: number; limit: number }
-): Promise<ILikersPage> {
+): Promise<ICommentLikersPage> {
   await assertCommentVisible(commentId, viewerId);
 
   const { page, limit } = query;

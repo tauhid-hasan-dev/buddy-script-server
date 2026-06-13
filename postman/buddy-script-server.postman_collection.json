@@ -805,7 +805,11 @@
 							"script": {
 								"exec": [
 									"pm.test('status is 200', () => pm.response.to.have.status(200));",
-									"pm.test('liked with count 1', () => pm.expect(pm.response.json()).to.eql({ liked: true, likeCount: 1 }));"
+									"pm.test('liked (LIKE) with count 1', () => {",
+									"  const b = pm.response.json();",
+									"  pm.expect(b).to.include({ liked: true, likeCount: 1, myReaction: 'LIKE' });",
+									"  pm.expect(b.reactions).to.eql([{ type: 'LIKE', count: 1 }]);",
+									"});"
 								],
 								"type": "text/javascript"
 							}
@@ -817,13 +821,18 @@
 					}
 				},
 				{
-					"name": "Like Post Again (Idempotent)",
+					"name": "Change Reaction to LOVE",
 					"event": [
 						{
 							"listen": "test",
 							"script": {
 								"exec": [
-									"pm.test('still liked, count still 1', () => pm.expect(pm.response.json()).to.eql({ liked: true, likeCount: 1 }));"
+									"pm.test('status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('switched to LOVE, count still 1', () => {",
+									"  const b = pm.response.json();",
+									"  pm.expect(b).to.include({ liked: true, likeCount: 1, myReaction: 'LOVE' });",
+									"  pm.expect(b.reactions).to.eql([{ type: 'LOVE', count: 1 }]);",
+									"});"
 								],
 								"type": "text/javascript"
 							}
@@ -831,7 +840,17 @@
 					],
 					"request": {
 						"method": "POST",
-						"url": "{{baseUrl}}/api/posts/{{postId}}/like"
+						"url": "{{baseUrl}}/api/posts/{{postId}}/like",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"type\": \"LOVE\"\n}"
+						}
 					}
 				},
 				{
@@ -842,10 +861,11 @@
 							"script": {
 								"exec": [
 									"pm.test('status is 200', () => pm.response.to.have.status(200));",
-									"pm.test('shows who liked', () => {",
+									"pm.test('shows who reacted, with type', () => {",
 									"  const { likes, meta } = pm.response.json();",
 									"  pm.expect(meta.total).to.eql(1);",
 									"  pm.expect(likes[0].user.id).to.eql(pm.collectionVariables.get('userId'));",
+									"  pm.expect(likes[0].type).to.eql('LOVE');",
 									"});"
 								],
 								"type": "text/javascript"
@@ -864,7 +884,8 @@
 							"listen": "test",
 							"script": {
 								"exec": [
-									"pm.test('unliked with count 0', () => pm.expect(pm.response.json()).to.eql({ liked: false, likeCount: 0 }));"
+									"pm.test('status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('reaction cleared', () => pm.expect(pm.response.json()).to.eql({ liked: false, likeCount: 0, myReaction: null, reactions: [] }));"
 								],
 								"type": "text/javascript"
 							}

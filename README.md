@@ -52,9 +52,9 @@ skipped when `NODE_ENV=test`.
 | GET    | `/api/posts/:id`     | ✓    | Single post (visibility-checked)             |
 | PATCH  | `/api/posts/:id`     | ✓    | Edit own `content`/`visibility` (403 otherwise) |
 | DELETE | `/api/posts/:id`     | ✓    | Delete own post (403 otherwise)              |
-| POST   | `/api/posts/:id/like`| ✓    | Like (idempotent) → `{ liked, likeCount }`   |
-| DELETE | `/api/posts/:id/like`| ✓    | Unlike (idempotent)                          |
-| GET    | `/api/posts/:id/likes`| ✓   | Who liked: `?page=1&limit=20`                |
+| POST   | `/api/posts/:id/like`| ✓    | React (idempotent); optional `{ type }` (LIKE default) → `{ liked, likeCount, myReaction, reactions }` |
+| DELETE | `/api/posts/:id/like`| ✓    | Remove reaction (idempotent)                 |
+| GET    | `/api/posts/:id/likes`| ✓   | Who reacted (with `type`): `?page=1&limit=20`|
 | POST   | `/api/posts/:id/comments` | ✓ | Comment, or reply via `parentId`          |
 | GET    | `/api/posts/:id/comments` | ✓ | Top-level comments, newest first (cursor) |
 | GET    | `/api/comments/:id/replies` | ✓ | Replies, oldest first (cursor)          |
@@ -75,9 +75,18 @@ skipped when `NODE_ENV=test`.
   trusted — and `image_url` stores the public CDN URL. Uploads are in-memory
   buffers (no local disk), so the API stays stateless across replicas; a
   failed insert removes its just-uploaded object.
-- **Likes are idempotent**: double-tap or retry safely; responses return the
-  authoritative `{ liked, likeCount }`. Every post/comment carries
-  `likedByMe`, `likeCount`, and counts computed per-viewer.
+- **Reactions (posts)**: a post like is a Facebook-style reaction — one of
+  `LIKE, LOVE, CARE, HAHA, WOW, SAD, ANGRY`. `POST /like` with an optional
+  `{ type }` body sets or **switches** the viewer's reaction (a user has at
+  most one per post, enforced by the composite PK); omitting the body means
+  `LIKE`, so the legacy endpoint is unchanged. Responses are idempotent and
+  authoritative: `{ liked, likeCount, myReaction, reactions }`, where
+  `reactions` is the per-type tally (most popular first) for the stacked-faces
+  summary. Every post DTO carries `likeCount` (total of all types),
+  `likedByMe`, `myReaction`, and `reactions`, all per-viewer.
+- **Comment likes stay a simple binary like** (`{ liked, likeCount }`) —
+  reactions are a post-only feature, so comments keep their own shape rather
+  than inheriting the post reaction payload.
 - **Comments**: one level of nesting — replies attach to a top-level comment
   (`parentId`); replies-to-replies are rejected with 400. Comments paginate
   newest-first by cursor; replies oldest-first (conversation order).
@@ -136,8 +145,15 @@ bad credentials / missing auth → 401.
 - **Likes are join tables with composite PKs** (`(post_id, user_id)`) — the PK
   doubles as the one-like-per-user constraint and the "who liked" index; no
   separate surrogate key to maintain.
-- **`likedByMe` without N+1**: the viewer's own like is fetched as a filtered
-  relation in the same query as the post page (at most one row per post).
+- **Reactions reuse that table, not a new one**: `post_likes` gained a `type`
+  enum column (`@default(LIKE)`), so the composite PK still enforces one
+  reaction per user and existing rows needed no backfill. A
+  `(post_id, type)` index serves the per-post `GROUP BY type` breakdown.
+- **`likedByMe`/`myReaction` without N+1**: the viewer's own reaction is
+  fetched as a filtered relation in the same query as the post page (at most
+  one row per post). The per-type **tally** for a whole feed page is one extra
+  `GROUP BY (post_id, type)` query over the page's ids — O(reactions on the
+  page), so the feed stays at two queries regardless of page size.
 - **Stateless auth** — any number of horizontal API replicas without shared
   session state. At larger scale, like/comment counts would denormalize onto
   posts and the hot first feed page would cache in Redis; the current shape
@@ -185,7 +201,7 @@ src/
       users.validation.ts       # strict schema — unknown fields rejected
     posts/
       posts.controller.ts
-      posts.interface.ts        # IPostDto, ILikeState, ILikersPage
+      posts.interface.ts        # IPostDto (+ myReaction/reactions), ILikeState, ILikersPage
       posts.route.ts            # create (multipart), get, delete, like, likers
       posts.service.ts          # visibility gate, shared post select/DTO
       posts.validation.ts

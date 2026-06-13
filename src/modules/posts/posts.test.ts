@@ -347,13 +347,16 @@ describe('post likes', () => {
       .post(`/api/posts/${post.id}/like`)
       .set('Cookie', liker.cookie);
     expect(like.status).toBe(200);
-    expect(like.body).toEqual({ liked: true, likeCount: 1 });
+    // A bare /like (no body) is still a LIKE reaction — backward compatible.
+    expect(like.body).toMatchObject({ liked: true, likeCount: 1, myReaction: 'LIKE' });
+    expect(like.body.reactions).toEqual([{ type: 'LIKE', count: 1 }]);
 
     const seen = await request(app)
       .get(`/api/posts/${post.id}`)
       .set('Cookie', liker.cookie);
     expect(seen.body.post.likedByMe).toBe(true);
     expect(seen.body.post.likeCount).toBe(1);
+    expect(seen.body.post.myReaction).toBe('LIKE');
 
     // The author hasn't liked it — state is per-viewer.
     const authorView = await request(app)
@@ -365,7 +368,12 @@ describe('post likes', () => {
       .delete(`/api/posts/${post.id}/like`)
       .set('Cookie', liker.cookie);
     expect(unlike.status).toBe(200);
-    expect(unlike.body).toEqual({ liked: false, likeCount: 0 });
+    expect(unlike.body).toEqual({
+      liked: false,
+      likeCount: 0,
+      myReaction: null,
+      reactions: [],
+    });
   });
 
   it('liking twice is idempotent', async () => {
@@ -378,7 +386,7 @@ describe('post likes', () => {
       .set('Cookie', cookie);
 
     expect(second.status).toBe(200);
-    expect(second.body).toEqual({ liked: true, likeCount: 1 });
+    expect(second.body).toMatchObject({ liked: true, likeCount: 1, myReaction: 'LIKE' });
   });
 
   it('lists who liked a post, newest like first', async () => {
@@ -399,6 +407,8 @@ describe('post likes', () => {
     const ids = res.body.likes.map((l: { user: { id: string } }) => l.user.id);
     expect(ids).toEqual([liker2.id, liker1.id]);
     expect(res.body.likes[0].user).not.toHaveProperty('email');
+    // Each liker entry carries which reaction they left.
+    expect(res.body.likes[0].type).toBe('LIKE');
   });
 
   it("404s liking someone else's private post", async () => {
@@ -411,5 +421,93 @@ describe('post likes', () => {
       .set('Cookie', other.cookie);
 
     expect(res.status).toBe(404);
+  });
+});
+
+describe('post reactions (typed)', () => {
+  it('records a typed reaction and reflects it in myReaction + breakdown', async () => {
+    const author = await registerUser();
+    const reactor = await registerUser();
+    const post = await createPost(author.cookie);
+
+    const res = await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', reactor.cookie)
+      .send({ type: 'LOVE' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ liked: true, likeCount: 1, myReaction: 'LOVE' });
+    expect(res.body.reactions).toEqual([{ type: 'LOVE', count: 1 }]);
+
+    const seen = await request(app)
+      .get(`/api/posts/${post.id}`)
+      .set('Cookie', reactor.cookie);
+    expect(seen.body.post.myReaction).toBe('LOVE');
+    expect(seen.body.post.reactions).toEqual([{ type: 'LOVE', count: 1 }]);
+  });
+
+  it('accepts case-insensitive reaction types', async () => {
+    const { cookie } = await registerUser();
+    const post = await createPost(cookie);
+
+    const res = await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', cookie)
+      .send({ type: 'haha' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.myReaction).toBe('HAHA');
+  });
+
+  it('changing reaction replaces the previous one (count stays 1)', async () => {
+    const { cookie } = await registerUser();
+    const post = await createPost(cookie);
+
+    await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', cookie)
+      .send({ type: 'LIKE' });
+
+    const changed = await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', cookie)
+      .send({ type: 'ANGRY' });
+
+    expect(changed.status).toBe(200);
+    expect(changed.body).toMatchObject({ liked: true, likeCount: 1, myReaction: 'ANGRY' });
+    expect(changed.body.reactions).toEqual([{ type: 'ANGRY', count: 1 }]);
+
+    const count = await prisma.postLike.count({ where: { postId: BigInt(post.id) } });
+    expect(count).toBe(1);
+  });
+
+  it('aggregates a mixed reaction breakdown, most popular first', async () => {
+    const author = await registerUser();
+    const a = await registerUser();
+    const b = await registerUser();
+    const post = await createPost(author.cookie);
+
+    await request(app).post(`/api/posts/${post.id}/like`).set('Cookie', author.cookie).send({ type: 'LOVE' });
+    await request(app).post(`/api/posts/${post.id}/like`).set('Cookie', a.cookie).send({ type: 'LOVE' });
+    await request(app).post(`/api/posts/${post.id}/like`).set('Cookie', b.cookie).send({ type: 'WOW' });
+
+    const seen = await request(app).get(`/api/posts/${post.id}`).set('Cookie', author.cookie);
+    expect(seen.body.post.likeCount).toBe(3);
+    expect(seen.body.post.reactions).toEqual([
+      { type: 'LOVE', count: 2 },
+      { type: 'WOW', count: 1 },
+    ]);
+  });
+
+  it('400s an invalid reaction type', async () => {
+    const { cookie } = await registerUser();
+    const post = await createPost(cookie);
+
+    const res = await request(app)
+      .post(`/api/posts/${post.id}/like`)
+      .set('Cookie', cookie)
+      .send({ type: 'CRYING' });
+
+    expect(res.status).toBe(400);
   });
 });

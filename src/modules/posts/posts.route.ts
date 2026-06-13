@@ -3,7 +3,7 @@ import requireAuth from '../../middleware/auth';
 import validate from '../../middleware/validate';
 import { uploadPostImage } from '../../middleware/upload';
 import { postCommentsRouter } from '../comments/comments.route';
-import { createPostSchema, updatePostSchema } from './posts.validation';
+import { createPostSchema, reactSchema, updatePostSchema } from './posts.validation';
 import { PostsController } from './posts.controller';
 
 const router = Router();
@@ -18,8 +18,10 @@ router.get('/:id', PostsController.getPost);
 router.patch('/:id', validate(updatePostSchema), PostsController.update);
 router.delete('/:id', PostsController.remove);
 
-router.post('/:id/like', PostsController.like);
-router.delete('/:id/like', PostsController.unlike);
+// /like is kept as the reaction endpoint for backward compatibility; the
+// optional { type } body selects which reaction (LIKE when the body is empty).
+router.post('/:id/like', validate(reactSchema), PostsController.react);
+router.delete('/:id/like', PostsController.unreact);
 router.get('/:id/likes', PostsController.likers);
 
 // Comments live in their own module; nested here for /posts/:postId/comments.

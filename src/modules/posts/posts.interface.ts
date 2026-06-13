@@ -1,4 +1,4 @@
-import type { Visibility } from '@prisma/client';
+import type { ReactionType, Visibility } from '@prisma/client';
 
 export interface ICreatePostInput {
   content: string;
@@ -18,8 +18,19 @@ export interface IPostAuthor {
   lastName: string;
 }
 
-// The shape every post-returning endpoint responds with. likedByMe makes the
-// like/unlike state renderable without a second request.
+// Per-type tally shown as the stacked reaction faces above the action bar,
+// already ordered most-popular-first by the service.
+export interface IReactionCount {
+  type: ReactionType;
+  count: number;
+}
+
+// The shape every post-returning endpoint responds with.
+// - likeCount: total reactions of any type (kept named for backward compat).
+// - likedByMe: whether the viewer has any reaction (myReaction !== null).
+// - myReaction: the viewer's specific reaction, or null — lets the client
+//   render the active reaction without a second request.
+// - reactions: per-type breakdown, most popular first, for the faces summary.
 export interface IPostDto {
   id: string; // BigInt serialized as string for JSON safety
   content: string;
@@ -30,15 +41,22 @@ export interface IPostDto {
   likeCount: number;
   commentCount: number;
   likedByMe: boolean;
+  myReaction: ReactionType | null;
+  reactions: IReactionCount[];
 }
 
+// Returned by the react / unreact endpoints so the client can reconcile its
+// optimistic update. liked/likeCount stay for backward compatibility.
 export interface ILikeState {
   liked: boolean;
   likeCount: number;
+  myReaction: ReactionType | null;
+  reactions: IReactionCount[];
 }
 
 export interface ILikerEntry {
   likedAt: Date;
+  type: ReactionType;
   user: IPostAuthor;
 }
 

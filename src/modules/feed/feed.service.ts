@@ -1,5 +1,5 @@
 import prisma from '../../lib/prisma';
-import { postSelect, toPostDto } from '../posts/posts.service';
+import { postSelect, reactionBreakdown, toPostDto } from '../posts/posts.service';
 import type { IFeedPage, IFeedQuery } from './feed.interface';
 
 // Cursor-based pagination (WHERE id < cursor ORDER BY id DESC LIMIT n)
@@ -27,8 +27,12 @@ async function getFeed(viewerId: string, query: IFeedQuery): Promise<IFeedPage> 
   const page = hasMore ? posts.slice(0, limit) : posts;
   const last = page[page.length - 1];
 
+  // One extra GROUP BY query for the whole page's reaction tallies — keeps the
+  // feed at two queries regardless of page size (no per-post N+1).
+  const breakdown = await reactionBreakdown(page.map((post) => post.id));
+
   return {
-    posts: page.map(toPostDto),
+    posts: page.map((post) => toPostDto(post, breakdown.get(post.id.toString()) ?? [])),
     nextCursor: hasMore && last ? last.id.toString() : null,
   };
 }

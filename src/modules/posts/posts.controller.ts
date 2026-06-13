@@ -26,15 +26,16 @@ async function remove(req: Request, res: Response): Promise<void> {
   res.status(204).end();
 }
 
-async function like(req: Request, res: Response): Promise<void> {
+// Body is validated/defaulted by reactSchema in the route (no body → LIKE).
+async function react(req: Request, res: Response): Promise<void> {
   const postId = parseBigIntId(req.params.id, 'post id');
-  const state = await PostsService.like(postId, req.user!.id);
+  const state = await PostsService.react(postId, req.user!.id, req.body.type);
   res.json(state);
 }
 
-async function unlike(req: Request, res: Response): Promise<void> {
+async function unreact(req: Request, res: Response): Promise<void> {
   const postId = parseBigIntId(req.params.id, 'post id');
-  const state = await PostsService.unlike(postId, req.user!.id);
+  const state = await PostsService.unreact(postId, req.user!.id);
   res.json(state);
 }
 
@@ -45,4 +46,4 @@ async function likers(req: Request, res: Response): Promise<void> {
   res.json(page);
 }
 
-export const PostsController = { create, getPost, update, remove, like, unlike, likers };
+export const PostsController = { create, getPost, update, remove, react, unreact, likers };

@@ -33,3 +33,23 @@ export const likersQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
+
+// Reaction body for POST /posts/:id/like. Case-insensitive, and the whole
+// body is optional: under Express 5 a bodyless request leaves req.body
+// undefined, so the preprocess coerces that to {} and the field default makes
+// a bare like mean LIKE — keeping the legacy endpoint working.
+export const reactSchema = z.preprocess(
+  (value) => (value == null ? {} : value),
+  z.object({
+    type: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .pipe(
+        z.enum(['LIKE', 'LOVE', 'CARE', 'HAHA', 'WOW', 'SAD', 'ANGRY'], {
+          error: 'Reaction must be one of LIKE, LOVE, CARE, HAHA, WOW, SAD, ANGRY',
+        })
+      )
+      .default('LIKE'),
+  })
+);
