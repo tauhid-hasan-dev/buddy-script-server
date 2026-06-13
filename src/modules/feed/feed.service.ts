@@ -1,5 +1,6 @@
+import { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma';
-import { postSelect, reactionBreakdown, toPostDto } from '../posts/posts.service';
+import { postProjection, rawRowToDto, type IPostRawRow } from '../posts/posts.service';
 import type { IFeedPage, IFeedQuery } from './feed.interface';
 
 // Cursor-based pagination (WHERE id < cursor ORDER BY id DESC LIMIT n)
@@ -10,29 +11,30 @@ import type { IFeedPage, IFeedQuery } from './feed.interface';
 // Visibility: everyone sees public posts; private posts appear only in
 // their author's own feed. The (visibility, id) and (author_id, id)
 // indexes let Postgres satisfy the OR with a BitmapOr instead of a scan.
+//
+// The whole page — rows, author, counts, the viewer's reaction, and the
+// per-type tallies — comes back in ONE statement via the shared projection
+// (see postProjection). The remote DB makes round-trips the dominant cost, so
+// folding the old findMany + GROUP BY pair into a single query halves the
+// latency; the per-post tallies are indexed correlated subqueries, so the page
+// stays O(page size) with no N+1.
 async function getFeed(viewerId: string, query: IFeedQuery): Promise<IFeedPage> {
   const { limit, cursor } = query;
 
-  const posts = await prisma.post.findMany({
-    where: {
-      ...(cursor ? { id: { lt: BigInt(cursor) } } : {}),
-      OR: [{ visibility: 'PUBLIC' }, { authorId: viewerId }],
-    },
-    orderBy: { id: 'desc' },
-    take: limit + 1, // fetch one extra to know if another page exists
-    select: postSelect(viewerId),
-  });
+  const rows = await prisma.$queryRaw<IPostRawRow[]>(Prisma.sql`
+    ${postProjection(viewerId)}
+    WHERE (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
+    ${cursor ? Prisma.sql`AND p.id < ${BigInt(cursor)}` : Prisma.empty}
+    ORDER BY p.id DESC
+    LIMIT ${limit + 1}
+  `);
 
-  const hasMore = posts.length > limit;
-  const page = hasMore ? posts.slice(0, limit) : posts;
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
   const last = page[page.length - 1];
 
-  // One extra GROUP BY query for the whole page's reaction tallies — keeps the
-  // feed at two queries regardless of page size (no per-post N+1).
-  const breakdown = await reactionBreakdown(page.map((post) => post.id));
-
   return {
-    posts: page.map((post) => toPostDto(post, breakdown.get(post.id.toString()) ?? [])),
+    posts: page.map(rawRowToDto),
     nextCursor: hasMore && last ? last.id.toString() : null,
   };
 }

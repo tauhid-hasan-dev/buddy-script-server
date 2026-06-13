@@ -1,4 +1,4 @@
-import { Prisma, type ReactionType } from '@prisma/client';
+import { Prisma, type ReactionType, type Visibility } from '@prisma/client';
 import prisma from '../../lib/prisma';
 import { StorageService } from '../../lib/storage';
 import HttpError from '../../utils/httpError';
@@ -6,6 +6,7 @@ import type {
   ICreatePostInput,
   ILikersPage,
   ILikeState,
+  IPostAuthor,
   IPostDto,
   IReactionCount,
   IUpdatePostInput,
@@ -80,6 +81,67 @@ async function dtoForRow(post: PostRow): Promise<IPostDto> {
   return toPostDto(post, map.get(post.id.toString()) ?? []);
 }
 
+// --- Single-query read projection (feed + single post) ---------------------
+// The Prisma `postSelect` + `reactionBreakdown` pair needs two round-trips: one
+// for the page rows, one for the per-type tally. Against the remote DB that's
+// two × ~700ms. This raw projection folds everything — author, like/comment
+// counts, the viewer's own reaction, and the per-type breakdown as JSON — into
+// ONE statement so reads cost a single trip. Every correlated subquery is
+// indexed (post_likes/comments by post_id), so the page stays O(page size).
+export interface IPostRawRow {
+  id: bigint;
+  content: string;
+  image_url: string | null;
+  visibility: Visibility;
+  created_at: Date;
+  author: IPostAuthor;
+  like_count: number;
+  comment_count: number;
+  my_reaction: ReactionType | null;
+  reactions: IReactionCount[];
+}
+
+// SELECT ... FROM posts JOIN users — the caller appends WHERE / ORDER / LIMIT.
+export function postProjection(viewerId: string): Prisma.Sql {
+  return Prisma.sql`
+    SELECT
+      p.id,
+      p.content,
+      p.image_url,
+      p.visibility,
+      p.created_at,
+      json_build_object('id', u.id, 'firstName', u.first_name, 'lastName', u.last_name) AS author,
+      (SELECT count(*)::int FROM post_likes pl WHERE pl.post_id = p.id) AS like_count,
+      (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id) AS comment_count,
+      (SELECT pl.type FROM post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${viewerId}::uuid) AS my_reaction,
+      COALESCE((
+        SELECT json_agg(json_build_object('type', t.type, 'count', t.count) ORDER BY t.count DESC, t.type)
+        FROM (
+          SELECT type, count(*)::int AS count
+          FROM post_likes pl WHERE pl.post_id = p.id GROUP BY type
+        ) t
+      ), '[]'::json) AS reactions
+    FROM posts p
+    JOIN users u ON u.id = p.author_id
+  `;
+}
+
+export function rawRowToDto(row: IPostRawRow): IPostDto {
+  return {
+    id: row.id.toString(),
+    content: row.content,
+    imageUrl: row.image_url,
+    visibility: row.visibility,
+    createdAt: row.created_at,
+    author: row.author,
+    likeCount: row.like_count,
+    commentCount: row.comment_count,
+    likedByMe: row.my_reaction !== null,
+    myReaction: row.my_reaction,
+    reactions: row.reactions,
+  };
+}
+
 // Visibility gate used by every post interaction (read, react, comment).
 // Private posts 404 for everyone but the author — a 403 would confirm the
 // post exists, which is itself a leak.
@@ -121,15 +183,22 @@ async function create(
   }
 }
 
+// One round-trip: the visibility gate is the WHERE clause, so a private post
+// seen by anyone but its author simply returns no row → 404 (a 403 would
+// confirm it exists). The projection already carries counts, the viewer's
+// reaction, and the breakdown — no follow-up query.
 async function getById(postId: bigint, viewerId: string): Promise<IPostDto> {
-  await assertPostVisible(postId, viewerId);
+  const rows = await prisma.$queryRaw<IPostRawRow[]>(Prisma.sql`
+    ${postProjection(viewerId)}
+    WHERE p.id = ${postId}
+      AND (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
+  `);
 
-  const post = await prisma.post.findUniqueOrThrow({
-    where: { id: postId },
-    select: postSelect(viewerId),
-  });
-
-  return dtoForRow(post);
+  const row = rows[0];
+  if (!row) {
+    throw new HttpError(404, 'Post not found');
+  }
+  return rawRowToDto(row);
 }
 
 // Edit own post's content and/or visibility. Ownership is checked the same

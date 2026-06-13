@@ -149,11 +149,17 @@ bad credentials / missing auth → 401.
   enum column (`@default(LIKE)`), so the composite PK still enforces one
   reaction per user and existing rows needed no backfill. A
   `(post_id, type)` index serves the per-post `GROUP BY type` breakdown.
-- **`likedByMe`/`myReaction` without N+1**: the viewer's own reaction is
-  fetched as a filtered relation in the same query as the post page (at most
-  one row per post). The per-type **tally** for a whole feed page is one extra
-  `GROUP BY (post_id, type)` query over the page's ids — O(reactions on the
-  page), so the feed stays at two queries regardless of page size.
+- **Reads are one round-trip**: feed and single-post both return everything —
+  author, like/comment counts, the viewer's own reaction, and the per-type
+  tally as JSON — from a **single** statement (the shared `postProjection` raw
+  query). The remote DB makes round-trips the dominant cost (~700ms each), so
+  the old two-trip shape (page rows, then a `GROUP BY (post_id, type)` over the
+  page's ids) doubled feed latency; folding the tallies and counts into indexed
+  correlated subqueries keeps the page **O(page size)** with no N+1 while paying
+  one trip instead of two. `getById` likewise collapses its visibility-check →
+  fetch → breakdown into one query: the `PUBLIC OR own` predicate is the WHERE
+  clause, so a private post seen by a stranger returns no row → 404 (a 403 would
+  leak existence).
 - **React/un-react are one round-trip**: the database is remote, so each query
   pays real network + pooler latency (≈700ms observed in dev). The naive
   visibility-check → upsert → breakdown sequence is three *serial* trips (~2.1s);
