@@ -1,7 +1,12 @@
 import { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma';
 import { cache, feedFirstPageKey } from '../../lib/cache';
-import { postProjection, rawRowToDto, type IPostRawRow } from '../posts/posts.service';
+import {
+  getPostsState,
+  postProjection,
+  rawRowToDto,
+  type IPostRawRow,
+} from '../posts/posts.service';
 import type {
   IFeedPage,
   IFeedQuery,
@@ -84,20 +89,26 @@ async function getUpdates(
   viewerId: string,
   query: IFeedUpdatesQuery
 ): Promise<IFeedUpdates> {
-  const { after, limit } = query;
+  const { after, limit, ids } = query;
 
-  const rows = await prisma.$queryRaw<IPostRawRow[]>(Prisma.sql`
-    ${postProjection(viewerId)}
-    WHERE (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
-      AND p.id > ${BigInt(after)}
-    ORDER BY p.id DESC
-    LIMIT ${limit + 1}
-  `);
+  // Two independent reads — new posts above `after`, and refreshed state for
+  // posts already on screen — issued in parallel so the poll is a single
+  // round-trip's worth of latency, not two serial ones.
+  const [rows, updated] = await Promise.all([
+    prisma.$queryRaw<IPostRawRow[]>(Prisma.sql`
+      ${postProjection(viewerId)}
+      WHERE (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
+        AND p.id > ${BigInt(after)}
+      ORDER BY p.id DESC
+      LIMIT ${limit + 1}
+    `),
+    getPostsState(viewerId, ids.map(BigInt)),
+  ]);
 
   const hasMore = rows.length > limit;
   const page = hasMore ? rows.slice(0, limit) : rows;
 
-  return { posts: page.map(rawRowToDto), hasMore };
+  return { posts: page.map(rawRowToDto), updated, hasMore };
 }
 
 export const FeedService = { getFeed, getUpdates };

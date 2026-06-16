@@ -348,9 +348,10 @@
 							"script": {
 								"exec": [
 									"pm.test('status is 200', () => pm.response.to.have.status(200));",
-									"pm.test('returns posts + hasMore', () => {",
+									"pm.test('returns posts + updated + hasMore', () => {",
 									"  const body = pm.response.json();",
 									"  pm.expect(body.posts).to.be.an('array');",
+									"  pm.expect(body.updated).to.be.an('array');",
 									"  pm.expect(body).to.have.property('hasMore');",
 									"  pm.expect(body.hasMore).to.be.a('boolean');",
 									"});"
@@ -362,7 +363,7 @@
 					"request": {
 						"method": "GET",
 						"url": {
-							"raw": "{{baseUrl}}/api/feed/updates?after=0&limit=10",
+							"raw": "{{baseUrl}}/api/feed/updates?after=0&ids=1&limit=10",
 							"host": [
 								"{{baseUrl}}"
 							],
@@ -375,6 +376,10 @@
 								{
 									"key": "after",
 									"value": "0"
+								},
+								{
+									"key": "ids",
+									"value": "1"
 								},
 								{
 									"key": "limit",
@@ -412,6 +417,48 @@
 								"api",
 								"feed",
 								"updates"
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Feed Updates — Invalid ids",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('flags the ids field', () => {",
+									"  const { details } = pm.response.json();",
+									"  pm.expect(details.map(d => d.field)).to.include('ids');",
+									"});"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{baseUrl}}/api/feed/updates?after=0&ids=1,abc",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"feed",
+								"updates"
+							],
+							"query": [
+								{
+									"key": "after",
+									"value": "0"
+								},
+								{
+									"key": "ids",
+									"value": "1,abc"
+								}
 							]
 						}
 					}

@@ -27,7 +27,7 @@ npm test          # Vitest + Supertest integration tests (needs the database)
 npm run test:watch
 ```
 
-119 integration tests across auth, users, posts, comments, and feed — covering
+124 integration tests across auth, users, posts, comments, and feed — covering
 the security cases (password never echoed, bcrypt at rest, generic 401s,
 private-post 404s, ownership 403s, malformed/deleted-user tokens, httpOnly
 cookie flags, upload type/size limits) and the product behavior (like/unlike
@@ -45,7 +45,7 @@ skipped when `NODE_ENV=test`.
 | POST   | `/api/auth/logout`   | —    | Clears the auth cookie                       |
 | GET    | `/api/auth/me`       | ✓    | Current user                                 |
 | GET    | `/api/feed`          | ✓    | Paginated feed: `?cursor=<postId>&limit=20`  |
-| GET    | `/api/feed/updates`  | ✓    | New posts since an id (live poll): `?after=<postId>&limit=10` → `{ posts, hasMore }` |
+| GET    | `/api/feed/updates`  | ✓    | Live poll: new posts since an id + refreshed like/comment state for on-screen posts: `?after=<postId>&ids=<csv>&limit=10` → `{ posts, updated, hasMore }` |
 | GET    | `/api/users`         | ✓    | Paginated profiles: `?page=1&limit=20`       |
 | GET    | `/api/users/:id`     | ✓    | User profile (includes email, `avatarUrl`)   |
 | PATCH  | `/api/users/me`      | ✓    | Update own `firstName` / `lastName`          |
@@ -229,15 +229,21 @@ bad credentials / missing auth → 401.
   stale, so another user's post would take that long to appear — too slow for a
   live feed. Rather than weaken the cache (which protects the heavy projection
   query on the hottest read), the web client polls a separate, **uncached**
-  endpoint that asks "give me posts newer than the id I already have on top."
-  It's a bounded forward-only scan of the same `(visibility, id DESC)` index
-  (`WHERE id > after … LIMIT n`), same visibility rule as the feed (private
-  posts never leak), returning full post DTOs the client prepends directly. New
-  posts surface within one poll interval (~5s) regardless of the feed cache,
-  while the expensive page read stays cached. Polling (not WebSockets) keeps the
-  API stateless and serverless-friendly; the browser talks only to this JWT-authed
-  API, so auth and privacy stay server-enforced. A push upgrade (Supabase
-  Realtime) can later replace the client poll without changing this contract.
+  endpoint that does two cheap reads in parallel: (1) posts newer than the id
+  the viewer already has on top (`WHERE id > after … LIMIT n`, a bounded
+  forward-only scan of the same `(visibility, id DESC)` index), and (2) the
+  refreshed like/comment state for the on-screen post `ids` (`getPostsState` —
+  the reaction tallies, comment count, and the viewer's own reaction, skipping
+  the immutable content/author/image). Both halves apply the same visibility
+  rule as the feed, so private posts never leak. The client prepends the new
+  posts and patches the counts onto existing cards, so **new posts, reactions,
+  and comments all go live with the same latency** (one poll interval, ~5s)
+  regardless of the feed cache, while the expensive page read stays cached. The
+  state query is bounded (≤100 ids) and indexed, so it stays O(on-screen posts).
+  Polling (not WebSockets) keeps the API stateless and serverless-friendly; the
+  browser talks only to this JWT-authed API, so auth and privacy stay
+  server-enforced. A push upgrade (Supabase Realtime) can later replace the
+  client poll without changing this contract.
 - **Raw queries are schema-qualified for the transaction pooler.** Supabase's
   transaction-mode pooler resets session state (including `search_path`) between
   transactions, so an unqualified table name in a `$queryRaw` would

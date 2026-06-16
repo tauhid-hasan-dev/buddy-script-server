@@ -49,6 +49,19 @@ export interface IPostDto {
   reactions: IReactionCount[];
 }
 
+// The mutable slice of a post — reaction tallies and comment count — without
+// the immutable content/author/image. Returned by the live-update poll so the
+// client can refresh likes and comment counts on posts already on screen
+// cheaply, with the same low latency as a brand-new post appearing.
+export interface IPostState {
+  id: string;
+  likeCount: number;
+  commentCount: number;
+  likedByMe: boolean;
+  myReaction: ReactionType | null;
+  reactions: IReactionCount[];
+}
+
 // Returned by the react / unreact endpoints so the client can reconcile its
 // optimistic update. liked/likeCount stay for backward compatibility.
 export interface ILikeState {

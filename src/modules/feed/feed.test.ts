@@ -34,6 +34,24 @@ async function createPost(cookie: string, content: string, visibility = 'PUBLIC'
 const feedContents = (body: { posts: { content: string }[] }) =>
   body.posts.map((p) => p.content);
 
+async function likePost(cookie: string, postId: string, type = 'LIKE') {
+  const res = await request(app)
+    .post(`/api/posts/${postId}/like`)
+    .set('Cookie', cookie)
+    .send({ type });
+  expect(res.status).toBe(200);
+  return res.body;
+}
+
+async function commentOnPost(cookie: string, postId: string, content: string) {
+  const res = await request(app)
+    .post(`/api/posts/${postId}/comments`)
+    .set('Cookie', cookie)
+    .send({ content });
+  expect(res.status).toBe(201);
+  return res.body.comment;
+}
+
 afterAll(async () => {
   await prisma.user.deleteMany({ where: { email: { startsWith: EMAIL_PREFIX } } });
   await prisma.$disconnect();
@@ -250,5 +268,89 @@ describe('GET /api/feed/updates', () => {
     expect(res.status).toBe(200);
     expect(res.body.posts).toHaveLength(2);
     expect(res.body.hasMore).toBe(true);
+  });
+
+  // The live-state half: `ids` refreshes like/comment counts on posts already
+  // on screen, so reactions and comments go real-time, not just new posts.
+  it('refreshes another user’s like and comment counts via `ids`', async () => {
+    const viewer = await registerUser();
+    const other = await registerUser();
+    const post = await createPost(viewer.cookie, 'updates-state-post');
+
+    // Viewer's snapshot: nothing yet.
+    const before = await request(app)
+      .get(`/api/feed/updates?after=${post.id}&ids=${post.id}`)
+      .set('Cookie', viewer.cookie);
+    expect(before.status).toBe(200);
+    expect(before.body.updated).toHaveLength(1);
+    expect(before.body.updated[0]).toMatchObject({
+      id: post.id,
+      likeCount: 0,
+      commentCount: 0,
+      likedByMe: false,
+      myReaction: null,
+    });
+
+    // Another user reacts and comments.
+    await likePost(other.cookie, post.id, 'LOVE');
+    await commentOnPost(other.cookie, post.id, 'live state!');
+
+    const after = await request(app)
+      .get(`/api/feed/updates?after=${post.id}&ids=${post.id}`)
+      .set('Cookie', viewer.cookie);
+    expect(after.status).toBe(200);
+    const state = after.body.updated.find((u: { id: string }) => u.id === post.id);
+    expect(state.likeCount).toBe(1);
+    expect(state.commentCount).toBe(1);
+    expect(state.reactions).toEqual([{ type: 'LOVE', count: 1 }]);
+    // The like is the *other* user's, so it is not the viewer's reaction.
+    expect(state.likedByMe).toBe(false);
+    expect(state.myReaction).toBeNull();
+  });
+
+  it('reflects the viewer’s own reaction in `myReaction` (cross-tab/session sync)', async () => {
+    const viewer = await registerUser();
+    const post = await createPost(viewer.cookie, 'updates-own-reaction');
+    await likePost(viewer.cookie, post.id, 'WOW');
+
+    const res = await request(app)
+      .get(`/api/feed/updates?after=${post.id}&ids=${post.id}`)
+      .set('Cookie', viewer.cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.updated[0]).toMatchObject({
+      likedByMe: true,
+      myReaction: 'WOW',
+      likeCount: 1,
+    });
+  });
+
+  it('never returns state for a post the viewer can’t see (private of another user)', async () => {
+    const viewer = await registerUser();
+    const other = await registerUser();
+    const anchor = await createPost(viewer.cookie, 'updates-state-anchor');
+    const secret = await createPost(other.cookie, 'updates-state-secret', 'PRIVATE');
+
+    const res = await request(app)
+      .get(`/api/feed/updates?after=${anchor.id}&ids=${secret.id}`)
+      .set('Cookie', viewer.cookie);
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toHaveLength(0);
+  });
+
+  it('returns an empty `updated` array when no ids are requested', async () => {
+    const viewer = await registerUser();
+    const anchor = await createPost(viewer.cookie, 'updates-no-ids');
+    const res = await updates(viewer.cookie, anchor.id);
+    expect(res.status).toBe(200);
+    expect(res.body.updated).toEqual([]);
+  });
+
+  it('rejects a non-numeric id in `ids` with 400', async () => {
+    const viewer = await registerUser();
+    const res = await request(app)
+      .get('/api/feed/updates?after=0&ids=1,abc')
+      .set('Cookie', viewer.cookie);
+    expect(res.status).toBe(400);
+    expect(res.body.details?.[0]?.field).toBe('ids');
   });
 });

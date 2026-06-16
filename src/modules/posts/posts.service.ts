@@ -17,6 +17,7 @@ import type {
   ILikeState,
   IPostAuthor,
   IPostDto,
+  IPostState,
   IReactionCount,
   IUpdatePostInput,
 } from './posts.interface';
@@ -118,6 +119,54 @@ export function rawRowToDto(row: IPostRawRow): IPostDto {
     myReaction: row.my_reaction,
     reactions: row.reactions,
   };
+}
+
+interface IPostStateRow {
+  id: bigint;
+  like_count: number;
+  comment_count: number;
+  my_reaction: ReactionType | null;
+  reactions: IReactionCount[];
+}
+
+// Current reaction/comment state for a bounded set of posts the viewer already
+// has on screen — the cheap complement to the full feed projection. Skips the
+// immutable columns (content, author, image) and the JOIN, so the live-update
+// poll can refresh likes and comment counts without re-sending unchanged data.
+// Same visibility gate as the feed (a private post the viewer can't see simply
+// returns no row), same indexed correlated subqueries → O(number of ids).
+export async function getPostsState(
+  viewerId: string,
+  ids: bigint[]
+): Promise<IPostState[]> {
+  if (ids.length === 0) return [];
+
+  const rows = await prisma.$queryRaw<IPostStateRow[]>(Prisma.sql`
+    SELECT
+      p.id,
+      p.like_count,
+      p.comment_count,
+      (SELECT pl.type FROM ${T}post_likes pl WHERE pl.post_id = p.id AND pl.user_id = ${viewerId}::uuid) AS my_reaction,
+      COALESCE((
+        SELECT json_agg(json_build_object('type', t.type, 'count', t.count) ORDER BY t.count DESC, t.type)
+        FROM (
+          SELECT type, count(*)::int AS count
+          FROM ${T}post_likes pl WHERE pl.post_id = p.id GROUP BY type
+        ) t
+      ), '[]'::json) AS reactions
+    FROM ${T}posts p
+    WHERE p.id IN (${Prisma.join(ids)})
+      AND (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
+  `);
+
+  return rows.map((r) => ({
+    id: r.id.toString(),
+    likeCount: r.like_count,
+    commentCount: r.comment_count,
+    likedByMe: r.my_reaction !== null,
+    myReaction: r.my_reaction,
+    reactions: r.reactions,
+  }));
 }
 
 // Visibility gate used by every post interaction (read, react, comment).
