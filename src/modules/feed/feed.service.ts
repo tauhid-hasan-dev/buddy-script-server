@@ -2,7 +2,12 @@ import { Prisma } from '@prisma/client';
 import prisma from '../../lib/prisma';
 import { cache, feedFirstPageKey } from '../../lib/cache';
 import { postProjection, rawRowToDto, type IPostRawRow } from '../posts/posts.service';
-import type { IFeedPage, IFeedQuery } from './feed.interface';
+import type {
+  IFeedPage,
+  IFeedQuery,
+  IFeedUpdates,
+  IFeedUpdatesQuery,
+} from './feed.interface';
 
 // The default first feed page (no cursor, default limit) is the single hottest
 // read in the system and what the web client requests on load. Cache it
@@ -63,4 +68,36 @@ async function getFeed(viewerId: string, query: IFeedQuery): Promise<IFeedPage> 
   return result;
 }
 
-export const FeedService = { getFeed };
+// Powers the client's live-update poll: "give me posts newer than the one I
+// already have on top." Deliberately NOT cached — the first-page cache above
+// trades up to FEED_FIRST_PAGE_TTL_SECONDS of staleness for read throughput,
+// which is fine for the bulk page but would make new posts from *other* users
+// take that long to appear. This query is the cheap complement: a bounded,
+// forward-only scan of the same (visibility, id DESC) index, returning at most
+// `limit` of the newest rows above `after`. Same visibility rule as getFeed, so
+// a viewer never sees others' private posts here either.
+//
+// Returns newest-first. If more than `limit` posts arrived since `after`, only
+// the newest `limit` come back (hasMore=true); the client advances its anchor
+// and the next poll picks up the rest — no gap, just paced delivery.
+async function getUpdates(
+  viewerId: string,
+  query: IFeedUpdatesQuery
+): Promise<IFeedUpdates> {
+  const { after, limit } = query;
+
+  const rows = await prisma.$queryRaw<IPostRawRow[]>(Prisma.sql`
+    ${postProjection(viewerId)}
+    WHERE (p.visibility = 'PUBLIC' OR p.author_id = ${viewerId}::uuid)
+      AND p.id > ${BigInt(after)}
+    ORDER BY p.id DESC
+    LIMIT ${limit + 1}
+  `);
+
+  const hasMore = rows.length > limit;
+  const page = hasMore ? rows.slice(0, limit) : rows;
+
+  return { posts: page.map(rawRowToDto), hasMore };
+}
+
+export const FeedService = { getFeed, getUpdates };

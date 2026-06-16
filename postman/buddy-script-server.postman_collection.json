@@ -339,6 +339,82 @@
 							]
 						}
 					}
+				},
+				{
+					"name": "Get Feed Updates",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('status is 200', () => pm.response.to.have.status(200));",
+									"pm.test('returns posts + hasMore', () => {",
+									"  const body = pm.response.json();",
+									"  pm.expect(body.posts).to.be.an('array');",
+									"  pm.expect(body).to.have.property('hasMore');",
+									"  pm.expect(body.hasMore).to.be.a('boolean');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{baseUrl}}/api/feed/updates?after=0&limit=10",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"feed",
+								"updates"
+							],
+							"query": [
+								{
+									"key": "after",
+									"value": "0"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Get Feed Updates — Missing after",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"pm.test('status is 400', () => pm.response.to.have.status(400));",
+									"pm.test('flags the after field', () => {",
+									"  const { details } = pm.response.json();",
+									"  pm.expect(details.map(d => d.field)).to.include('after');",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "GET",
+						"url": {
+							"raw": "{{baseUrl}}/api/feed/updates",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"api",
+								"feed",
+								"updates"
+							]
+						}
+					}
 				}
 			]
 		},

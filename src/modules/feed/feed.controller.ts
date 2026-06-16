@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { FeedService } from './feed.service';
-import { feedQuerySchema } from './feed.validation';
+import { feedQuerySchema, feedUpdatesQuerySchema } from './feed.validation';
 
 // GET /api/feed?cursor=<lastPostId>&limit=20
 async function getFeed(req: Request, res: Response): Promise<void> {
@@ -12,4 +12,13 @@ async function getFeed(req: Request, res: Response): Promise<void> {
   res.json(page);
 }
 
-export const FeedController = { getFeed };
+// GET /api/feed/updates?after=<newestPostId>&limit=10
+// The client's live-update poll: returns posts newer than `after`. Uncached so
+// other users' posts surface within one poll interval, not one cache TTL.
+async function getUpdates(req: Request, res: Response): Promise<void> {
+  const query = feedUpdatesQuerySchema.parse(req.query);
+  const updates = await FeedService.getUpdates(req.user!.id, query);
+  res.json(updates);
+}
+
+export const FeedController = { getFeed, getUpdates };

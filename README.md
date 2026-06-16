@@ -27,7 +27,7 @@ npm test          # Vitest + Supertest integration tests (needs the database)
 npm run test:watch
 ```
 
-81 integration tests across auth, users, posts, comments, and feed — covering
+119 integration tests across auth, users, posts, comments, and feed — covering
 the security cases (password never echoed, bcrypt at rest, generic 401s,
 private-post 404s, ownership 403s, malformed/deleted-user tokens, httpOnly
 cookie flags, upload type/size limits) and the product behavior (like/unlike
@@ -45,6 +45,7 @@ skipped when `NODE_ENV=test`.
 | POST   | `/api/auth/logout`   | —    | Clears the auth cookie                       |
 | GET    | `/api/auth/me`       | ✓    | Current user                                 |
 | GET    | `/api/feed`          | ✓    | Paginated feed: `?cursor=<postId>&limit=20`  |
+| GET    | `/api/feed/updates`  | ✓    | New posts since an id (live poll): `?after=<postId>&limit=10` → `{ posts, hasMore }` |
 | GET    | `/api/users`         | ✓    | Paginated profiles: `?page=1&limit=20`       |
 | GET    | `/api/users/:id`     | ✓    | User profile (includes email, `avatarUrl`)   |
 | PATCH  | `/api/users/me`      | ✓    | Update own `firstName` / `lastName`          |
@@ -218,13 +219,25 @@ bad credentials / missing auth → 401.
   keying means the viewer-specific fields (`likedByMe` / `myReaction`) can never
   leak across users; the key is invalidated on that viewer's own writes (create,
   edit, delete, react) so they never see their own action go missing, while
-  other viewers see new public posts within the TTL — acceptable bounded
-  staleness for a feed, and the web client already prepends new posts
-  optimistically. **Redis is optional config** (`REDIS_URL`): when set the cache
+  other viewers see new public posts within the TTL. **Redis is optional config** (`REDIS_URL`): when set the cache
   is shared across replicas; when unset it falls back to an in-process store, so
   dev, tests, and single-instance deploys need no extra service (same opt-in
   shape as Supabase Storage). Deeper pages and non-default limits always hit the
   DB.
+- **Near-real-time feed via an uncached delta poll** (`GET /api/feed/updates`).
+  The hot-page cache above means a viewer's first feed page can be up to 15s
+  stale, so another user's post would take that long to appear — too slow for a
+  live feed. Rather than weaken the cache (which protects the heavy projection
+  query on the hottest read), the web client polls a separate, **uncached**
+  endpoint that asks "give me posts newer than the id I already have on top."
+  It's a bounded forward-only scan of the same `(visibility, id DESC)` index
+  (`WHERE id > after … LIMIT n`), same visibility rule as the feed (private
+  posts never leak), returning full post DTOs the client prepends directly. New
+  posts surface within one poll interval (~5s) regardless of the feed cache,
+  while the expensive page read stays cached. Polling (not WebSockets) keeps the
+  API stateless and serverless-friendly; the browser talks only to this JWT-authed
+  API, so auth and privacy stay server-enforced. A push upgrade (Supabase
+  Realtime) can later replace the client poll without changing this contract.
 - **Raw queries are schema-qualified for the transaction pooler.** Supabase's
   transaction-mode pooler resets session state (including `search_path`) between
   transactions, so an unqualified table name in a `$queryRaw` would

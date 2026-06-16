@@ -165,3 +165,90 @@ describe('GET /api/feed (first-page cache)', () => {
     expect(feedContents(refreshed.body)).toContain('my-own-post-after-cache');
   });
 });
+
+// The live-update poll that powers near-real-time feeds: returns posts newer
+// than `after`, uncached, same visibility rule as the feed. The headline case
+// is the cache-bypass one — another user's post is visible here within a poll
+// interval even while the viewer's first-page feed is still cached.
+describe('GET /api/feed/updates', () => {
+  const updates = (cookie: string, after: string, limit?: number) =>
+    request(app)
+      .get(`/api/feed/updates?after=${after}${limit ? `&limit=${limit}` : ''}`)
+      .set('Cookie', cookie);
+
+  it('returns 401 without authentication', async () => {
+    const res = await request(app).get('/api/feed/updates?after=0');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects a missing or non-numeric `after` with 400 and a field error', async () => {
+    const viewer = await registerUser();
+
+    const missing = await request(app).get('/api/feed/updates').set('Cookie', viewer.cookie);
+    expect(missing.status).toBe(400);
+    expect(missing.body.details?.[0]?.field).toBe('after');
+
+    const bad = await updates(viewer.cookie, 'abc');
+    expect(bad.status).toBe(400);
+    expect(bad.body.details?.[0]?.field).toBe('after');
+  });
+
+  it('returns only posts strictly newer than `after`, newest first', async () => {
+    const viewer = await registerUser();
+    const older = await createPost(viewer.cookie, 'updates-older');
+    const newer = await createPost(viewer.cookie, 'updates-newer');
+
+    const res = await updates(viewer.cookie, older.id);
+    expect(res.status).toBe(200);
+    const contents = feedContents(res.body);
+    expect(contents).toContain('updates-newer');
+    expect(contents).not.toContain('updates-older'); // strictly greater than `after`
+    expect(res.body.posts[0].id).toBe(newer.id); // newest first
+  });
+
+  // Regression guard for the real-time bug: the viewer's first feed page is
+  // cached, but another user's brand-new post must still surface through this
+  // endpoint immediately — it does not share the feed's cache.
+  it('surfaces another user’s new post even while the viewer’s feed page is cached', async () => {
+    const viewer = await registerUser();
+    const other = await registerUser();
+
+    // Establish the viewer's anchor and prime their first-page feed cache.
+    const anchor = await createPost(viewer.cookie, 'updates-anchor');
+    await request(app).get('/api/feed').set('Cookie', viewer.cookie); // prime cache
+
+    // Another user posts. The viewer's cached feed page would not show this
+    // until its TTL lapses — but the updates poll is uncached.
+    const fresh = await createPost(other.cookie, 'updates-from-other-user');
+
+    const res = await updates(viewer.cookie, anchor.id);
+    expect(res.status).toBe(200);
+    const ids = res.body.posts.map((p: { id: string }) => p.id);
+    expect(ids).toContain(fresh.id);
+    expect(feedContents(res.body)).toContain('updates-from-other-user');
+  });
+
+  it('never leaks another user’s private post', async () => {
+    const viewer = await registerUser();
+    const other = await registerUser();
+    const anchor = await createPost(viewer.cookie, 'updates-private-anchor');
+    await createPost(other.cookie, 'updates-secret', 'PRIVATE');
+
+    const res = await updates(viewer.cookie, anchor.id);
+    expect(res.status).toBe(200);
+    expect(feedContents(res.body)).not.toContain('updates-secret');
+  });
+
+  it('caps the batch at `limit` and flags hasMore when more remain', async () => {
+    const viewer = await registerUser();
+    const anchor = await createPost(viewer.cookie, 'updates-limit-anchor');
+    await createPost(viewer.cookie, 'updates-limit-1');
+    await createPost(viewer.cookie, 'updates-limit-2');
+    await createPost(viewer.cookie, 'updates-limit-3');
+
+    const res = await updates(viewer.cookie, anchor.id, 2);
+    expect(res.status).toBe(200);
+    expect(res.body.posts).toHaveLength(2);
+    expect(res.body.hasMore).toBe(true);
+  });
+});
