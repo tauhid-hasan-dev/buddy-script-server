@@ -5,6 +5,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
+    "postinstall": "prisma generate",
+    "vercel-build": "prisma generate",
     "dev": "tsx watch src/server.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
